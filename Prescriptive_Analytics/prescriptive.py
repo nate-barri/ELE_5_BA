@@ -17,23 +17,25 @@ print("PREDICTIVE MODELING & OPTIMIZATION ANALYSIS")
 print("=" * 80)
 
 def load_data():
-    """
-    Load and preprocess the dataset
-    """
     print("=" * 80)
     print("LOADING AND PREPROCESSING DATA")
     print("=" * 80)
+
+    # Correct path when running from ELE_5_BA
     csv_file = "ETL/dataset_ele_5_cleaned_adjusted.csv"
+
     df = pd.read_csv(csv_file)
     df['purchase_date'] = pd.to_datetime(df['purchase_date'])
     df = df.sort_values('purchase_date').reset_index(drop=True)
-    # Additional preprocessing like discount flags if needed
+
     if 'markdown_percentage' in df.columns:
         df['has_discount'] = df['markdown_percentage'] > 0
     else:
         df['has_discount'] = False
+
     print(f"Data loaded: {len(df)} rows")
     return df
+
 
 
 # ============================================================================
@@ -124,7 +126,6 @@ def calculate_eoq(df):
 def newsvendor_model(df):
     """
     Newsvendor model for optimal inventory under uncertain demand
-    Optimal service level = (p - c) / p, where p = price, c = cost
     """
     print("\n" + "=" * 80)
     print("2. NEWSVENDOR MODEL (Stochastic Inventory)")
@@ -142,14 +143,18 @@ def newsvendor_model(df):
     # Assume 70% of current_price is cost, 30% is margin
     category_demand['cost'] = category_demand['avg_price'] * 0.7
     category_demand['margin'] = category_demand['avg_price'] * 0.3
-    category_demand['optimal_service_level'] = (category_demand['avg_price'] - category_demand['cost']) / category_demand['avg_price']
     
     # Calculate daily demand statistics
     daily_demand = df.groupby(['category', df['purchase_date'].dt.date])['product_id'].count().reset_index()
     daily_demand_stats = daily_demand.groupby('category')['product_id'].agg(['mean', 'std', 'min', 'max']).round(2)
     daily_demand_stats.columns = ['mean_daily_demand', 'std_daily_demand', 'min_daily_demand', 'max_daily_demand']
-    
-    category_results = pd.concat([category_demand, daily_demand_stats], axis=1)
+
+    # Calculate monthly demand statistics
+    monthly_demand = df.groupby(['category', df['purchase_date'].dt.to_period('M')])['product_id'].count().reset_index()
+    monthly_demand_stats = monthly_demand.groupby('category')['product_id'].agg(['mean', 'std', 'min', 'max']).round(2)
+    monthly_demand_stats.columns = ['mean_monthly_demand', 'std_monthly_demand', 'min_monthly_demand', 'max_monthly_demand']
+
+    category_results = pd.concat([category_demand, daily_demand_stats, monthly_demand_stats], axis=1)
     
     shortage_cost_rate = 50  # Cost per unit short
     category_results['Expected_Shortage'] = np.maximum(
@@ -160,66 +165,50 @@ def newsvendor_model(df):
     print("\nNewsvendor Analysis by Category:")
     print(category_results.to_string())
     
-    # Calculate optimal order quantities for different service levels
-    print("\nOptimal Order Quantities at Different Service Levels:")
-    for category in category_results.index[:5]:
-        mean_demand = category_results.loc[category, 'mean_daily_demand']
-        std_demand = category_results.loc[category, 'std_daily_demand']
-        service_level = category_results.loc[category, 'optimal_service_level']
-        
-        # Z-score for optimal service level
-        z_score = norm.ppf(service_level)
-        optimal_quantity = mean_demand + z_score * std_demand
-        
-        print(f"\n  {category}:")
-        print(f"    - Mean daily demand: {mean_demand:.1f} units")
-        print(f"    - Std dev: {std_demand:.1f} units")
-        print(f"    - Optimal service level: {service_level:.1%}")
-        print(f"    - Optimal order quantity: {optimal_quantity:.0f} units")
-    
-    # Visualization
+    # Visualization - Main newsvendor analysis
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
-    # Plot 1: Service level by category
-    axes[0, 0].barh(range(len(category_results)), category_results['optimal_service_level'].values * 100, color='mediumseagreen')
-    axes[0, 0].set_yticks(range(len(category_results)))
-    axes[0, 0].set_yticklabels(category_results.index)
-    axes[0, 0].set_xlabel('Optimal Service Level (%)', fontweight='bold')
-    axes[0, 0].set_title('Target Service Levels by Category', fontweight='bold', fontsize=12)
-    axes[0, 0].grid(axis='x', alpha=0.3)
-    
-    # Plot 2: Demand variability
-    axes[0, 1].scatter(category_results['mean_daily_demand'], category_results['std_daily_demand'], s=300, alpha=0.6, color='purple')
+
+    # Plot 1: Demand variability
+    axes[0, 0].scatter(category_results['mean_daily_demand'], category_results['std_daily_demand'], s=300, alpha=0.6, color='purple')
     for i, cat in enumerate(category_results.index):
-        axes[0, 1].annotate(cat, (category_results.iloc[i]['mean_daily_demand'], category_results.iloc[i]['std_daily_demand']), 
+        axes[0, 0].annotate(cat, (category_results.iloc[i]['mean_daily_demand'], category_results.iloc[i]['std_daily_demand']),
                            fontsize=8, ha='center')
-    axes[0, 1].set_xlabel('Mean Daily Demand (units)', fontweight='bold')
-    axes[0, 1].set_ylabel('Demand Std Dev (units)', fontweight='bold')
-    axes[0, 1].set_title('Demand Variability by Category', fontweight='bold', fontsize=12)
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # Plot 3: Price vs Cost vs Margin
+    axes[0, 0].set_xlabel('Mean Daily Demand (units)', fontweight='bold')
+    axes[0, 0].set_ylabel('Demand Std Dev (units)', fontweight='bold')
+    axes[0, 0].set_title('Demand Variability by Category', fontweight='bold', fontsize=12)
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # Plot 2: Price vs Cost vs Margin
     x_pos = np.arange(len(category_results))
     width = 0.25
-    axes[1, 0].bar(x_pos - width, category_results['cost'], width, label='Cost', color='#e74c3c')
-    axes[1, 0].bar(x_pos, category_results['margin'], width, label='Margin', color='#2ecc71')
-    axes[1, 0].bar(x_pos + width, category_results['avg_price'], width, label='Price', color='#3498db')
-    axes[1, 0].set_ylabel('Amount ($)', fontweight='bold')
-    axes[1, 0].set_title('Price Structure by Category', fontweight='bold', fontsize=12)
-    axes[1, 0].set_xticks(x_pos)
-    axes[1, 0].set_xticklabels(category_results.index, rotation=45, ha='right')
-    axes[1, 0].legend()
-    axes[1, 0].grid(axis='y', alpha=0.3)
-    
-    # Plot 4: Demand range
-    demand_range = category_results['max_daily_demand'] - category_results['min_daily_demand']
-    axes[1, 1].barh(range(len(category_results)), demand_range.values, color='#f39c12')
+    axes[0, 1].bar(x_pos - width, category_results['cost'], width, label='Cost', color='#e74c3c')
+    axes[0, 1].bar(x_pos, category_results['margin'], width, label='Margin', color='#2ecc71')
+    axes[0, 1].bar(x_pos + width, category_results['avg_price'], width, label='Price', color='#3498db')
+    axes[0, 1].set_ylabel('Amount ($)', fontweight='bold')
+    axes[0, 1].set_title('Price Structure by Category', fontweight='bold', fontsize=12)
+    axes[0, 1].set_xticks(x_pos)
+    axes[0, 1].set_xticklabels(category_results.index, rotation=45, ha='right')
+    axes[0, 1].legend()
+    axes[0, 1].grid(axis='y', alpha=0.3)
+
+    # Plot 3: Monthly Demand Range
+    monthly_demand_range = category_results['max_monthly_demand'] - category_results['min_monthly_demand']
+    axes[1, 0].barh(range(len(category_results)), monthly_demand_range.values, color='#f39c12')
+    axes[1, 0].set_yticks(range(len(category_results)))
+    axes[1, 0].set_yticklabels(category_results.index)
+    axes[1, 0].set_xlabel('Monthly Demand Range (units)', fontweight='bold')
+    axes[1, 0].set_title('Monthly Demand Range by Category', fontweight='bold', fontsize=12)
+    axes[1, 0].grid(axis='x', alpha=0.3)
+
+    # Plot 4: Overall Demand Range
+    overall_demand_range = category_results['max_daily_demand'] - category_results['min_daily_demand']
+    axes[1, 1].barh(range(len(category_results)), overall_demand_range.values, color='#9b59b6')
     axes[1, 1].set_yticks(range(len(category_results)))
     axes[1, 1].set_yticklabels(category_results.index)
-    axes[1, 1].set_xlabel('Daily Demand Range (units)', fontweight='bold')
-    axes[1, 1].set_title('Daily Demand Range by Category', fontweight='bold', fontsize=12)
+    axes[1, 1].set_xlabel('Overall Demand Range (units)', fontweight='bold')
+    axes[1, 1].set_title('Overall Dataset Demand Range by Category', fontweight='bold', fontsize=12)
     axes[1, 1].grid(axis='x', alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig('newsvendor_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
@@ -251,7 +240,7 @@ def mixed_integer_programming(df):
     }).rename(columns={'product_id': 'demand'})
     
     # Assume warehouse capacity and costs
-    warehouse_capacity = 1000  # Units per warehouse
+    warehouse_capacity = 500  # Units per warehouse
     transportation_cost_per_unit = 5
     warehouse_cost_per_unit = 2
     
@@ -821,7 +810,6 @@ if __name__ == "__main__":
         print(f"   - Average annual inventory cost: ${eoq_results['total_inventory_cost'].mean():,.2f}")
         
         print("\n2. Newsvendor Model:")
-        print(f"   - Average optimal service level: {newsvendor_results['optimal_service_level'].mean():.1%}")
         print(f"   - Average expected shortage: {newsvendor_results['Expected_Shortage'].mean():.1f} units")
         
         print("\n3. MIP Model:")

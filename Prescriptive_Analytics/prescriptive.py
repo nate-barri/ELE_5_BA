@@ -205,7 +205,7 @@ def newsvendor_model(df):
     axes[1, 1].barh(range(len(category_results)), overall_demand_range.values, color='#9b59b6')
     axes[1, 1].set_yticks(range(len(category_results)))
     axes[1, 1].set_yticklabels(category_results.index)
-    axes[1, 1].set_xlabel('Overall Demand Range (units)', fontweight='bold')
+    axes[1, 1].set_xlabel('Overall Dataset Demand Range (units)', fontweight='bold')
     axes[1, 1].set_title('Overall Dataset Demand Range by Category', fontweight='bold', fontsize=12)
     axes[1, 1].grid(axis='x', alpha=0.3)
 
@@ -785,6 +785,341 @@ def markdown_optimization(df):
     return markdown_df
 
 # ============================================================================
+# 7. EXPORT RESULTS TO CSV FOR BI VISUALIZATION
+# ============================================================================
+def export_results_to_csv(eoq_results, newsvendor_results, mip_results, 
+                          stochastic_results, pricing_results, markdown_results, df):
+    """
+    Export all prescriptive analytics model results to CSV files
+    for Business Intelligence tool visualization (Power BI, Tableau, etc.)
+    """
+    print("\n" + "=" * 80)
+    print("7. EXPORTING RESULTS TO CSV FOR BI VISUALIZATION")
+    print("=" * 80)
+    
+    import os
+    
+    # Create output directory for CSV files
+    output_dir = "Prescriptive_Analytics/BI_Export"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    exported_files = []
+    
+    # -------------------------------------------------------------------------
+    # 1. EOQ Model Export
+    # -------------------------------------------------------------------------
+    eoq_export = eoq_results.reset_index()
+    eoq_export.columns = ['product_id', 'units_sold', 'total_revenue', 'avg_price', 
+                          'annual_demand', 'holding_cost', 'eoq', 'annual_orders',
+                          'annual_order_cost', 'annual_holding_cost', 'total_inventory_cost']
+    eoq_export['model'] = 'EOQ'
+    eoq_export['order_cost_assumed'] = 50
+    eoq_export['holding_cost_rate'] = 0.25
+    eoq_file = f"{output_dir}/eoq_model_results.csv"
+    eoq_export.to_csv(eoq_file, index=False)
+    exported_files.append(eoq_file)
+    print(f"✓ EOQ Model: {eoq_file}")
+    
+    # -------------------------------------------------------------------------
+    # 2. Newsvendor Model Export
+    # -------------------------------------------------------------------------
+    newsvendor_export = newsvendor_results.reset_index()
+    newsvendor_export.columns = ['category', 'units_sold', 'total_revenue', 'avg_revenue',
+                                  'revenue_std', 'avg_price', 'cost', 'margin',
+                                  'mean_daily_demand', 'std_daily_demand', 'min_daily_demand', 'max_daily_demand',
+                                  'mean_monthly_demand', 'std_monthly_demand', 'min_monthly_demand', 'max_monthly_demand',
+                                  'expected_shortage']
+    newsvendor_export['model'] = 'Newsvendor'
+    newsvendor_export['daily_demand_range'] = newsvendor_export['max_daily_demand'] - newsvendor_export['min_daily_demand']
+    newsvendor_export['monthly_demand_range'] = newsvendor_export['max_monthly_demand'] - newsvendor_export['min_monthly_demand']
+    newsvendor_export['demand_coefficient_of_variation'] = newsvendor_export['std_daily_demand'] / newsvendor_export['mean_daily_demand']
+    newsvendor_file = f"{output_dir}/newsvendor_model_results.csv"
+    newsvendor_export.to_csv(newsvendor_file, index=False)
+    exported_files.append(newsvendor_file)
+    print(f"✓ Newsvendor Model: {newsvendor_file}")
+    
+    # -------------------------------------------------------------------------
+    # 3. MIP Model Export
+    # -------------------------------------------------------------------------
+    mip_export = mip_results.copy()
+    mip_export.columns = ['warehouse_location', 'demand', 'allocation', 'capacity_utilization_pct',
+                          'revenue', 'cost', 'profit']
+    mip_export['model'] = 'MIP'
+    mip_export['warehouse_capacity'] = 500
+    mip_export['transportation_cost_per_unit'] = 5
+    mip_export['warehouse_cost_per_unit'] = 2
+    mip_export['unmet_demand'] = mip_export['demand'] - mip_export['allocation']
+    mip_export['profit_margin_pct'] = (mip_export['profit'] / mip_export['revenue'] * 100).round(2)
+    mip_file = f"{output_dir}/mip_model_results.csv"
+    mip_export.to_csv(mip_file, index=False)
+    exported_files.append(mip_file)
+    print(f"✓ MIP Model: {mip_file}")
+    
+    # -------------------------------------------------------------------------
+    # 4. Stochastic Optimization Export
+    # -------------------------------------------------------------------------
+    stochastic_export = stochastic_results.copy()
+
+    # Drop the extra CV column before renaming (it will be recomputed below)
+    if 'CV' in stochastic_export.columns:
+        stochastic_export = stochastic_export.drop(columns=['CV'])
+
+    stochastic_export.columns = [
+        'category', 'mean_demand', 'std_dev', 'min_demand', 'max_demand',
+        'optimal_stock', 'safety_stock', 'expected_shortage',
+        'stockout_risk_pct', 'expected_shortage_cost'
+    ]
+
+    stochastic_export['model'] = 'Stochastic'
+    stochastic_export['service_level_target'] = 95
+    stochastic_export['z_score_used'] = 1.645
+    stochastic_export['shortage_cost_per_unit'] = 50
+    stochastic_export['coefficient_of_variation'] = (
+        stochastic_export['std_dev'] / stochastic_export['mean_demand']
+    )
+    stochastic_export['demand_range'] = (
+        stochastic_export['max_demand'] - stochastic_export['min_demand']
+    )
+
+    stochastic_file = f"{output_dir}/stochastic_model_results.csv"
+    stochastic_export.to_csv(stochastic_file, index=False)
+    exported_files.append(stochastic_file)
+    print(f"✓ Stochastic Optimization: {stochastic_file}")
+
+    
+    # -------------------------------------------------------------------------
+    # 5. Dynamic Pricing Export
+    # -------------------------------------------------------------------------
+    pricing_export = pricing_results.copy()
+    pricing_export.columns = ['category', 'current_price', 'optimal_price', 'price_change_pct',
+                               'price_elasticity', 'current_quantity', 'expected_quantity',
+                               'current_revenue', 'expected_revenue', 'revenue_change_amount',
+                               'revenue_change_pct']
+    pricing_export['model'] = 'Dynamic_Pricing'
+    pricing_export['elasticity_type'] = pricing_export['price_elasticity'].apply(
+        lambda x: 'Elastic' if x < -1 else ('Inelastic' if x > -1 and x < 0 else 'Unit Elastic')
+    )
+    pricing_export['price_action'] = pricing_export['price_change_pct'].apply(
+        lambda x: 'Increase' if x > 0 else ('Decrease' if x < 0 else 'Maintain')
+    )
+    pricing_export['quantity_change_pct'] = ((pricing_export['expected_quantity'] - pricing_export['current_quantity']) / 
+                                              pricing_export['current_quantity'] * 100).round(2)
+    pricing_file = f"{output_dir}/dynamic_pricing_model_results.csv"
+    pricing_export.to_csv(pricing_file, index=False)
+    exported_files.append(pricing_file)
+    print(f"✓ Dynamic Pricing: {pricing_file}")
+    
+    # -------------------------------------------------------------------------
+    # 6. Markdown Optimization Export
+    # -------------------------------------------------------------------------
+    markdown_export = markdown_results.copy()
+    markdown_export.columns = ['category', 'current_markdown_pct', 'recommended_markdown_pct',
+                                'discounted_units', 'non_discounted_units', 'units_lift_pct',
+                                'price_loss_pct', 'markdown_efficiency', 'discounted_avg_price',
+                                'non_discounted_avg_price', 'discounted_total_profit',
+                                'non_discounted_total_profit', 'profit_difference']
+    markdown_export['model'] = 'Markdown_Optimization'
+    markdown_export['markdown_action'] = markdown_export.apply(
+        lambda x: 'Increase' if x['recommended_markdown_pct'] > x['current_markdown_pct'] 
+        else ('Decrease' if x['recommended_markdown_pct'] < x['current_markdown_pct'] else 'Maintain'), axis=1
+    )
+    markdown_export['is_markdown_efficient'] = markdown_export['markdown_efficiency'] > 1
+    markdown_export['avg_price_discount'] = ((markdown_export['non_discounted_avg_price'] - markdown_export['discounted_avg_price']) / 
+                                              markdown_export['non_discounted_avg_price'] * 100).round(2)
+    markdown_file = f"{output_dir}/markdown_optimization_results.csv"
+    markdown_export.to_csv(markdown_file, index=False)
+    exported_files.append(markdown_file)
+    print(f"✓ Markdown Optimization: {markdown_file}")
+    
+    # -------------------------------------------------------------------------
+    # 7. Combined Summary Export (for executive dashboards)
+    # -------------------------------------------------------------------------
+    summary_data = []
+    
+    # EOQ Summary
+    summary_data.append({
+        'model': 'EOQ',
+        'metric': 'Average EOQ',
+        'value': eoq_results['eoq'].mean(),
+        'unit': 'units'
+    })
+    summary_data.append({
+        'model': 'EOQ',
+        'metric': 'Total Annual Inventory Cost',
+        'value': eoq_results['total_inventory_cost'].sum(),
+        'unit': 'USD'
+    })
+    summary_data.append({
+        'model': 'EOQ',
+        'metric': 'Average Annual Orders',
+        'value': eoq_results['annual_orders'].mean(),
+        'unit': 'orders'
+    })
+    
+    # Newsvendor Summary
+    summary_data.append({
+        'model': 'Newsvendor',
+        'metric': 'Average Daily Demand',
+        'value': newsvendor_results['mean_daily_demand'].mean(),
+        'unit': 'units'
+    })
+    summary_data.append({
+        'model': 'Newsvendor',
+        'metric': 'Average Demand Variability',
+        'value': newsvendor_results['std_daily_demand'].mean(),
+        'unit': 'units'
+    })
+    
+    # MIP Summary
+    summary_data.append({
+        'model': 'MIP',
+        'metric': 'Total Optimized Profit',
+        'value': mip_results['Profit'].sum(),
+        'unit': 'USD'
+    })
+    summary_data.append({
+        'model': 'MIP',
+        'metric': 'Average Capacity Utilization',
+        'value': mip_results['Capacity_Used_%'].mean(),
+        'unit': 'percent'
+    })
+    
+    # Stochastic Summary
+    summary_data.append({
+        'model': 'Stochastic',
+        'metric': 'Average Stockout Risk',
+        'value': stochastic_results['Stockout_Risk_%'].mean(),
+        'unit': 'percent'
+    })
+    summary_data.append({
+        'model': 'Stochastic',
+        'metric': 'Total Expected Shortage Cost',
+        'value': stochastic_results['Expected_Shortage_Cost'].sum(),
+        'unit': 'USD'
+    })
+    summary_data.append({
+        'model': 'Stochastic',
+        'metric': 'Average Safety Stock',
+        'value': stochastic_results['Safety_Stock'].mean(),
+        'unit': 'units'
+    })
+    
+    # Dynamic Pricing Summary
+    summary_data.append({
+        'model': 'Dynamic_Pricing',
+        'metric': 'Average Revenue Uplift Potential',
+        'value': pricing_results['Revenue_Change_%'].mean(),
+        'unit': 'percent'
+    })
+    summary_data.append({
+        'model': 'Dynamic_Pricing',
+        'metric': 'Total Revenue Opportunity',
+        'value': pricing_results['Revenue_Change_$'].sum(),
+        'unit': 'USD'
+    })
+    
+    # Markdown Summary
+    summary_data.append({
+        'model': 'Markdown_Optimization',
+        'metric': 'Average Markdown Efficiency',
+        'value': markdown_results['Markdown_Efficiency'].mean(),
+        'unit': 'ratio'
+    })
+    summary_data.append({
+        'model': 'Markdown_Optimization',
+        'metric': 'Categories with Efficient Markdowns',
+        'value': (markdown_results['Markdown_Efficiency'] > 1).sum(),
+        'unit': 'count'
+    })
+    
+    summary_df = pd.DataFrame(summary_data)
+    summary_file = f"{output_dir}/executive_summary.csv"
+    summary_df.to_csv(summary_file, index=False)
+    exported_files.append(summary_file)
+    print(f"✓ Executive Summary: {summary_file}")
+    
+    # -------------------------------------------------------------------------
+    # 8. Time Series Data Export (for trend analysis in BI)
+    # -------------------------------------------------------------------------
+    df['date'] = df['purchase_date'].dt.date
+    daily_metrics = df.groupby('date').agg({
+        'product_id': 'count',
+        'total_sales': 'sum',
+        'current_price': 'mean',
+        'markdown_percentage': 'mean'
+    }).reset_index()
+    daily_metrics.columns = ['date', 'daily_units_sold', 'daily_revenue', 'avg_price', 'avg_markdown_pct']
+    daily_metrics['date'] = pd.to_datetime(daily_metrics['date'])
+    daily_metrics['day_of_week'] = daily_metrics['date'].dt.day_name()
+    daily_metrics['month'] = daily_metrics['date'].dt.month_name()
+    daily_metrics['week_number'] = daily_metrics['date'].dt.isocalendar().week
+    daily_metrics['is_weekend'] = daily_metrics['date'].dt.dayofweek >= 5
+    
+    timeseries_file = f"{output_dir}/daily_timeseries_data.csv"
+    daily_metrics.to_csv(timeseries_file, index=False)
+    exported_files.append(timeseries_file)
+    print(f"✓ Time Series Data: {timeseries_file}")
+    
+    # -------------------------------------------------------------------------
+    # 9. Category Performance Export
+    # -------------------------------------------------------------------------
+    category_perf = df.groupby('category').agg({
+        'product_id': 'count',
+        'total_sales': ['sum', 'mean'],
+        'current_price': 'mean',
+        'original_price': 'mean',
+        'markdown_percentage': 'mean'
+    }).reset_index()
+    category_perf.columns = ['category', 'total_units', 'total_revenue', 'avg_revenue_per_unit',
+                             'avg_current_price', 'avg_original_price', 'avg_markdown_pct']
+    category_perf['avg_discount_amount'] = category_perf['avg_original_price'] - category_perf['avg_current_price']
+    category_perf['revenue_share_pct'] = (category_perf['total_revenue'] / category_perf['total_revenue'].sum() * 100).round(2)
+    
+    category_file = f"{output_dir}/category_performance.csv"
+    category_perf.to_csv(category_file, index=False)
+    exported_files.append(category_file)
+    print(f"✓ Category Performance: {category_file}")
+    
+    # -------------------------------------------------------------------------
+    # 10. Geographic Performance Export
+    # -------------------------------------------------------------------------
+    geo_perf = df.groupby('country').agg({
+        'product_id': 'count',
+        'total_sales': ['sum', 'mean'],
+        'current_price': 'mean'
+    }).reset_index()
+    geo_perf.columns = ['country', 'total_units', 'total_revenue', 'avg_revenue_per_unit', 'avg_price']
+    geo_perf['revenue_share_pct'] = (geo_perf['total_revenue'] / geo_perf['total_revenue'].sum() * 100).round(2)
+    geo_perf['units_share_pct'] = (geo_perf['total_units'] / geo_perf['total_units'].sum() * 100).round(2)
+    
+    geo_file = f"{output_dir}/geographic_performance.csv"
+    geo_perf.to_csv(geo_file, index=False)
+    exported_files.append(geo_file)
+    print(f"✓ Geographic Performance: {geo_file}")
+    
+    # Final summary
+    print("\n" + "-" * 60)
+    print(f"Total CSV files exported: {len(exported_files)}")
+    print(f"Export location: {output_dir}/")
+    print("-" * 60)
+    print("\nFiles ready for BI tool import:")
+    for f in exported_files:
+        print(f"  - {f}")
+    print("\nRecommended BI visualizations:")
+    print("  1. EOQ: Bar charts for order quantities, cost breakdowns")
+    print("  2. Newsvendor: Scatter plots for demand variability")
+    print("  3. MIP: Treemaps for allocation, gauge charts for utilization")
+    print("  4. Stochastic: Risk heatmaps, safety stock gauges")
+    print("  5. Dynamic Pricing: Waterfall charts for revenue impact")
+    print("  6. Markdown: Efficiency quadrant charts, profit comparisons")
+    print("  7. Executive Summary: KPI cards, summary tables")
+    print("  8. Time Series: Line charts with trend analysis")
+    print("  9. Category/Geo: Pie charts, bar charts for performance")
+    
+    return exported_files
+
+
+# ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 if __name__ == "__main__":
@@ -799,6 +1134,11 @@ if __name__ == "__main__":
         stochastic_results = stochastic_optimization(df)
         pricing_results = dynamic_pricing_optimization(df)
         markdown_results = markdown_optimization(df)
+        
+        exported_files = export_results_to_csv(
+            eoq_results, newsvendor_results, mip_results,
+            stochastic_results, pricing_results, markdown_results, df
+        )
         
         # Summary report
         print("\n" + "=" * 80)
@@ -832,7 +1172,8 @@ if __name__ == "__main__":
         print(f"   - Average markdown efficiency: {markdown_results['Markdown_Efficiency'].mean():.2f}")
         
         print("\n" + "=" * 80)
-        print("Analysis complete! Check the generated PNG files for visualizations.")
+        print("Analysis complete! Check the generated PNG files for visualizations and CSV files for BI import.")
         print("=" * 80)
+        
     else:
         print("✗ Failed to load data. Please check the CSV file path.")

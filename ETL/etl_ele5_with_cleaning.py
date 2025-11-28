@@ -16,7 +16,7 @@ REQUIRED_COLUMNS = [
     "purchase_date",
     "total_sales",
     "country",
-    "countryCode"
+    "countrycode"
 ]
 
 # ------------- HELPERS -------------
@@ -31,7 +31,7 @@ def compute_row_hash(row):
         str(row.get("current_price", "")),
         str(row.get("total_sales", "")),
         str(row.get("country", "")),
-        str(row.get("countryCode", ""))
+        str(row.get("countrycode", ""))  # must match DF column name
     ]
     raw = "|".join(key_fields)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -39,6 +39,15 @@ def compute_row_hash(row):
 # ------------- 1. EXTRACT -------------
 
 df = pd.read_csv(CSV_PATH)
+
+# 🔧 FIX: normalize the country code column name from CSV
+# (your CSV likely has "countryCode" instead of "countrycode")
+if "countryCode" in df.columns and "countrycode" not in df.columns:
+    df = df.rename(columns={"countryCode": "countrycode"})
+
+# (Optional) quick debug to verify columns
+# print("Columns:", df.columns.tolist())
+
 df["__row_number"] = df.index + 1
 
 # ------------- 2. CLEAN / TRANSFORM (to landing) -------------
@@ -46,7 +55,7 @@ df["__row_number"] = df.index + 1
 errors = []
 
 # 2.1 standardize strings
-for col in ["category", "brand", "season", "size", "color", "country", "countryCode"]:
+for col in ["category", "brand", "season", "size", "color", "country", "countrycode"]:
     if col in df.columns:
         df[col] = df[col].astype(str).str.strip()
 
@@ -191,9 +200,9 @@ dim_product.insert(0, "product_key", dim_product.index + 1)
 
 # DIM LOCATION
 dim_location = (
-    df_landing_full[["country", "countryCode", "latitude", "longitude"]]
+    df_landing_full[["country", "countrycode", "latitude", "longitude"]]
     .drop_duplicates()
-    .sort_values(["country", "countryCode"])
+    .sort_values(["country", "countrycode"])
     .reset_index(drop=True)
 )
 dim_location.insert(0, "location_key", dim_location.index + 1)
@@ -214,7 +223,7 @@ fact = fact.merge(
 
 fact = fact.merge(
     dim_location,
-    on=["country", "countryCode", "latitude", "longitude"],
+    on=["country", "countrycode", "latitude", "longitude"],
     how="left"
 )
 

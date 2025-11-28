@@ -2,1178 +2,1207 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.optimize import minimize, LinearConstraint, Bounds
 from scipy.stats import norm
+from scipy.optimize import minimize, linprog, minimize_scalar
+from datetime import datetime, timedelta
+import os
 import warnings
 warnings.filterwarnings('ignore')
+
+from scipy.optimize import milp, LinearConstraint, Bounds
 
 # Set style
 sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (14, 8)
 plt.rcParams['font.size'] = 11
 
-print("=" * 80)
-print("PREDICTIVE MODELING & OPTIMIZATION ANALYSIS")
-print("=" * 80)
+print("=" * 100)
+print(" " * 20 + "PRESCRIPTIVE ANALYTICS - OPTIMIZATION MODELS")
+print("=" * 100)
 
+PRESCRIPTIVE_MODELS = {
+    "Classical Inventory Models": [],
+    "Optimization Models": [],
+    "Stochastic Models": [],
+    "Pricing Models": []
+}
+
+def register_model(category, model_name, description):
+    """Register a prescriptive model used"""
+    PRESCRIPTIVE_MODELS[category].append({"name": model_name, "description": description})
+
+
+# =============================================================================
+# DATA LOADING - From Predictive Analytics folder
+# =============================================================================
+
+# OLD VERSION - Loading from ETL folder (DISABLED)
+# def load_data():
+#     """Load and preprocess data from ETL folder"""
+#     csv_file = "ETL/dataset_ele_5_cleaned_adjusted.csv"
+#     df = pd.read_csv(csv_file)
+#     ...
+
+# NEW VERSION - Loading from Predictive_Analytics folder
 def load_data():
-    print("=" * 80)
-    print("LOADING AND PREPROCESSING DATA")
-    print("=" * 80)
-
-    # Correct path when running from ELE_5_BA
-    csv_file = "ETL/dataset_ele_5_cleaned_adjusted.csv"
-
+    """Load data from Predictive_Analytics folder"""
+    csv_file = "Predictive_Analytics/dataset_ele_5_cleaned_adjusted.csv"
+    
     df = pd.read_csv(csv_file)
     df['purchase_date'] = pd.to_datetime(df['purchase_date'])
     df = df.sort_values('purchase_date').reset_index(drop=True)
-
-    if 'markdown_percentage' in df.columns:
-        df['has_discount'] = df['markdown_percentage'] > 0
-    else:
-        df['has_discount'] = False
-
-    print(f"Data loaded: {len(df)} rows")
+    
+    # Create features
+    df['has_discount'] = df['markdown_percentage'] > 0
+    df['discount_amount'] = df['original_price'] - df['current_price']
+    
+    def get_season(month):
+        if month in [12, 1, 2]:
+            return 'Winter'
+        elif month in [3, 4, 5]:
+            return 'Spring'
+        elif month in [6, 7, 8]:
+            return 'Summer'
+        else:
+            return 'Fall'
+    
+    df['season'] = df['purchase_date'].dt.month.apply(get_season)
+    df['year_month'] = df['purchase_date'].dt.to_period('M')
+    df['month'] = df['purchase_date'].dt.month
+    df['day_of_week'] = df['purchase_date'].dt.dayofweek
+    df['quarter'] = df['purchase_date'].dt.quarter
+    df['week_of_year'] = df['purchase_date'].dt.isocalendar().week.astype(int)
+    
+    print(f"\nDataset loaded: {len(df):,} transactions")
+    print(f"Date Range: {df['purchase_date'].min().strftime('%Y-%m-%d')} to {df['purchase_date'].max().strftime('%Y-%m-%d')}")
+    
     return df
 
 
+# =============================================================================
+# HELPER: Compute demand statistics for prescriptive models
+# =============================================================================
 
-# ============================================================================
-# 1. ECONOMIC ORDER QUANTITY (EOQ) MODEL
-# ============================================================================
-def calculate_eoq(df):
-    """
-    Calculate optimal Economic Order Quantity
-    EOQ = sqrt((2 * D * S) / H)
-    where D = annual demand, S = order cost, H = holding cost
-    """
-    print("\n" + "=" * 80)
-    print("1. ECONOMIC ORDER QUANTITY (EOQ) MODEL")
-    print("=" * 80)
+def compute_demand_statistics(df):
+    """Compute demand statistics needed for prescriptive models"""
+    print("\n" + "=" * 100)
+    print("COMPUTING DEMAND STATISTICS FOR PRESCRIPTIVE MODELS")
+    print("=" * 100)
     
-    # Group by product and calculate metrics
-    product_stats = df.groupby('product_id').agg({
-        'product_id': 'count',  # quantity ordered
-        'total_sales': 'sum',   # revenue
-        'current_price': 'mean'  # average price
-    }).rename(columns={'product_id': 'units_sold'})
+    # Product-level demand statistics
+    product_demand = df.groupby('product_id').agg({
+        'total_sales': ['sum', 'mean', 'std', 'count'],
+        'current_price': 'mean',
+        'original_price': 'mean',
+        'markdown_percentage': 'mean',
+        'category': 'first',
+        'brand': 'first'
+    }).reset_index()
     
-    # Calculate annual metrics
-    product_stats['annual_demand'] = product_stats['units_sold'] * (365 / (df['purchase_date'].max() - df['purchase_date'].min()).days)
+    product_demand.columns = ['product_id', 'total_revenue', 'mean_daily_revenue', 'std_daily_revenue', 
+                               'num_transactions', 'avg_price', 'original_price', 'avg_markdown',
+                               'category', 'brand']
     
-    # Assumed costs (you can adjust these)
-    order_cost = 50  # Cost per order
-    holding_cost_rate = 0.25  # 25% of product value per year
+    # Calculate units sold (approximation)
+    product_demand['units_sold'] = product_demand['total_revenue'] / product_demand['avg_price']
+    product_demand['mean_daily_demand'] = product_demand['units_sold'] / product_demand['num_transactions']
+    product_demand['std_daily_demand'] = product_demand['std_daily_revenue'] / product_demand['avg_price']
+    product_demand['std_daily_demand'] = product_demand['std_daily_demand'].fillna(
+        product_demand['mean_daily_demand'] * 0.3)  # Default CV of 0.3
     
-    product_stats['holding_cost'] = product_stats['current_price'] * holding_cost_rate
-    product_stats['eoq'] = np.sqrt((2 * product_stats['annual_demand'] * order_cost) / product_stats['holding_cost'])
-    product_stats['annual_orders'] = product_stats['annual_demand'] / product_stats['eoq']
-    product_stats['annual_order_cost'] = product_stats['annual_orders'] * order_cost
-    product_stats['annual_holding_cost'] = (product_stats['eoq'] / 2) * product_stats['holding_cost']
-    product_stats['total_inventory_cost'] = product_stats['annual_order_cost'] + product_stats['annual_holding_cost']
-    
-    # Top products by EOQ
-    eoq_results = product_stats.nlargest(10, 'annual_demand')[['units_sold', 'annual_demand', 'eoq', 'annual_orders', 'total_inventory_cost']]
-    
-    print("\nTop 10 Products - EOQ Analysis:")
-    print(eoq_results.to_string())
-    
-    # Visualization
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
-    # Plot 1: EOQ by product
-    top_eoq = product_stats.nlargest(10, 'annual_demand')
-    axes[0, 0].barh(range(len(top_eoq)), top_eoq['eoq'].values, color='steelblue')
-    axes[0, 0].set_yticks(range(len(top_eoq)))
-    axes[0, 0].set_yticklabels([f"Product {pid}" for pid in top_eoq.index])
-    axes[0, 0].set_xlabel('Economic Order Quantity (units)', fontweight='bold')
-    axes[0, 0].set_title('Optimal Order Quantity by Product', fontweight='bold', fontsize=12)
-    axes[0, 0].grid(axis='x', alpha=0.3)
-    
-    # Plot 2: Annual demand vs EOQ
-    axes[0, 1].scatter(product_stats['annual_demand'], product_stats['eoq'], alpha=0.6, s=100, color='green')
-    axes[0, 1].set_xlabel('Annual Demand (units)', fontweight='bold')
-    axes[0, 1].set_ylabel('EOQ (units)', fontweight='bold')
-    axes[0, 1].set_title('Annual Demand vs Optimal Order Quantity', fontweight='bold', fontsize=12)
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # Plot 3: Cost comparison
-    cost_data = product_stats.nlargest(10, 'annual_demand')[['annual_order_cost', 'annual_holding_cost']]
-    cost_data.plot(kind='bar', ax=axes[1, 0], color=['#e74c3c', '#3498db'])
-    axes[1, 0].set_ylabel('Annual Cost ($)', fontweight='bold')
-    axes[1, 0].set_title('Annual Ordering vs Holding Costs', fontweight='bold', fontsize=12)
-    axes[1, 0].legend(['Order Cost', 'Holding Cost'], fontsize=10)
-    axes[1, 0].grid(axis='y', alpha=0.3)
-    
-    # Plot 4: Total inventory cost
-    axes[1, 1].barh(range(len(top_eoq)), top_eoq['total_inventory_cost'].values, color='coral')
-    axes[1, 1].set_yticks(range(len(top_eoq)))
-    axes[1, 1].set_yticklabels([f"Product {pid}" for pid in top_eoq.index])
-    axes[1, 1].set_xlabel('Total Annual Inventory Cost ($)', fontweight='bold')
-    axes[1, 1].set_title('Total Inventory Management Cost', fontweight='bold', fontsize=12)
-    axes[1, 1].grid(axis='x', alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig('eoq_analysis.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    print("✓ EOQ visualization saved as 'eoq_analysis.png'")
-    
-    return product_stats
-
-# ============================================================================
-# 2. NEWSVENDOR MODEL
-# ============================================================================
-def newsvendor_model(df):
-    """
-    Newsvendor model for optimal inventory under uncertain demand
-    """
-    print("\n" + "=" * 80)
-    print("2. NEWSVENDOR MODEL (Stochastic Inventory)")
-    print("=" * 80)
-    
-    # Group by category to get demand distribution
+    # Category-level statistics
     category_demand = df.groupby('category').agg({
-        'product_id': 'count',
         'total_sales': ['sum', 'mean', 'std'],
-        'current_price': 'mean'
-    }).round(2)
+        'current_price': 'mean',
+        'markdown_percentage': 'mean'
+    }).reset_index()
+    category_demand.columns = ['category', 'total_revenue', 'mean_revenue', 'std_revenue', 
+                                'avg_price', 'avg_markdown']
     
-    category_demand.columns = ['units_sold', 'total_revenue', 'avg_revenue', 'revenue_std', 'avg_price']
+    print(f"\nProducts analyzed: {len(product_demand)}")
+    print(f"Categories analyzed: {len(category_demand)}")
     
-    # Assume 70% of current_price is cost, 30% is margin
-    category_demand['cost'] = category_demand['avg_price'] * 0.7
-    category_demand['margin'] = category_demand['avg_price'] * 0.3
-    
-    # Calculate daily demand statistics
-    daily_demand = df.groupby(['category', df['purchase_date'].dt.date])['product_id'].count().reset_index()
-    daily_demand_stats = daily_demand.groupby('category')['product_id'].agg(['mean', 'std', 'min', 'max']).round(2)
-    daily_demand_stats.columns = ['mean_daily_demand', 'std_daily_demand', 'min_daily_demand', 'max_daily_demand']
+    return product_demand, category_demand
 
-    # Calculate monthly demand statistics
-    monthly_demand = df.groupby(['category', df['purchase_date'].dt.to_period('M')])['product_id'].count().reset_index()
-    monthly_demand_stats = monthly_demand.groupby('category')['product_id'].agg(['mean', 'std', 'min', 'max']).round(2)
-    monthly_demand_stats.columns = ['mean_monthly_demand', 'std_monthly_demand', 'min_monthly_demand', 'max_monthly_demand']
 
-    category_results = pd.concat([category_demand, daily_demand_stats, monthly_demand_stats], axis=1)
+# =============================================================================
+# MODEL 1: ECONOMIC ORDER QUANTITY (EOQ)
+# Classical inventory optimization model
+# =============================================================================
+
+def model_eoq(df, product_demand):
+    """
+    Economic Order Quantity (EOQ) Model
     
-    shortage_cost_rate = 50  # Cost per unit short
-    category_results['Expected_Shortage'] = np.maximum(
-        category_results['std_daily_demand'] * 0.1,  # Estimated shortage as percentage of std dev
-        0
+    Formula: EOQ = sqrt(2 * D * S / H)
+    Where:
+        D = Annual demand
+        S = Ordering cost per order
+        H = Holding cost per unit per year
+    
+    This model determines the optimal order quantity that minimizes
+    total inventory costs (ordering + holding costs).
+    """
+    print("\n" + "=" * 100)
+    print("MODEL 1: ECONOMIC ORDER QUANTITY (EOQ)")
+    print("Objective: Minimize total inventory costs (ordering + holding)")
+    print("=" * 100)
+    
+    register_model("Classical Inventory Models", "Economic Order Quantity (EOQ)",
+                   "Determines optimal order quantity minimizing total inventory costs")
+    
+    # Parameters
+    ordering_cost = 50  # Cost per order ($)
+    holding_cost_rate = 0.25  # 25% of item value per year
+    lead_time_days = 7
+    service_level = 0.95
+    z_score = norm.ppf(service_level)
+    
+    # Calculate EOQ for each product
+    eoq_results = product_demand.copy()
+    
+    # Annualize demand (assuming data represents a sample period)
+    days_in_data = (df['purchase_date'].max() - df['purchase_date'].min()).days
+    eoq_results['annual_demand'] = eoq_results['units_sold'] * (365 / max(days_in_data, 1))
+    
+    # Holding cost per unit
+    eoq_results['holding_cost'] = eoq_results['avg_price'] * holding_cost_rate
+    
+    # EOQ Formula
+    eoq_results['eoq'] = np.sqrt(
+        (2 * eoq_results['annual_demand'] * ordering_cost) / 
+        eoq_results['holding_cost'].replace(0, 0.01)
     )
     
-    print("\nNewsvendor Analysis by Category:")
-    print(category_results.to_string())
+    # Safety Stock (for demand variability)
+    eoq_results['safety_stock'] = z_score * eoq_results['std_daily_demand'] * np.sqrt(lead_time_days)
     
-    # Visualization - Main newsvendor analysis
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # Plot 1: Demand variability
-    axes[0, 0].scatter(category_results['mean_daily_demand'], category_results['std_daily_demand'], s=300, alpha=0.6, color='purple')
-    for i, cat in enumerate(category_results.index):
-        axes[0, 0].annotate(cat, (category_results.iloc[i]['mean_daily_demand'], category_results.iloc[i]['std_daily_demand']),
-                           fontsize=8, ha='center')
-    axes[0, 0].set_xlabel('Mean Daily Demand (units)', fontweight='bold')
-    axes[0, 0].set_ylabel('Demand Std Dev (units)', fontweight='bold')
-    axes[0, 0].set_title('Demand Variability by Category', fontweight='bold', fontsize=12)
-    axes[0, 0].grid(True, alpha=0.3)
-
-    # Plot 2: Price vs Cost vs Margin
-    x_pos = np.arange(len(category_results))
-    width = 0.25
-    axes[0, 1].bar(x_pos - width, category_results['cost'], width, label='Cost', color='#e74c3c')
-    axes[0, 1].bar(x_pos, category_results['margin'], width, label='Margin', color='#2ecc71')
-    axes[0, 1].bar(x_pos + width, category_results['avg_price'], width, label='Price', color='#3498db')
-    axes[0, 1].set_ylabel('Amount ($)', fontweight='bold')
-    axes[0, 1].set_title('Price Structure by Category', fontweight='bold', fontsize=12)
-    axes[0, 1].set_xticks(x_pos)
-    axes[0, 1].set_xticklabels(category_results.index, rotation=45, ha='right')
-    axes[0, 1].legend()
-    axes[0, 1].grid(axis='y', alpha=0.3)
-
-    # Plot 3: Monthly Demand Range
-    monthly_demand_range = category_results['max_monthly_demand'] - category_results['min_monthly_demand']
-    axes[1, 0].barh(range(len(category_results)), monthly_demand_range.values, color='#f39c12')
-    axes[1, 0].set_yticks(range(len(category_results)))
-    axes[1, 0].set_yticklabels(category_results.index)
-    axes[1, 0].set_xlabel('Monthly Demand Range (units)', fontweight='bold')
-    axes[1, 0].set_title('Monthly Demand Range by Category', fontweight='bold', fontsize=12)
-    axes[1, 0].grid(axis='x', alpha=0.3)
-
-    # Plot 4: Overall Demand Range
-    overall_demand_range = category_results['max_daily_demand'] - category_results['min_daily_demand']
-    axes[1, 1].barh(range(len(category_results)), overall_demand_range.values, color='#9b59b6')
-    axes[1, 1].set_yticks(range(len(category_results)))
-    axes[1, 1].set_yticklabels(category_results.index)
-    axes[1, 1].set_xlabel('Overall Dataset Demand Range (units)', fontweight='bold')
-    axes[1, 1].set_title('Overall Dataset Demand Range by Category', fontweight='bold', fontsize=12)
-    axes[1, 1].grid(axis='x', alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig('newsvendor_analysis.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    print("✓ Newsvendor visualization saved as 'newsvendor_analysis.png'")
+    # Reorder Point
+    eoq_results['reorder_point'] = (eoq_results['mean_daily_demand'] * lead_time_days) + eoq_results['safety_stock']
     
-    return category_results
-
-# ============================================================================
-# 3. MIXED-INTEGER PROGRAMMING (MIP) MODEL
-# ============================================================================
-def mixed_integer_programming(df):
-    """
-    MIP for inventory allocation across warehouses/locations
-    Maximizes profit subject to inventory constraints
-    """
-    print("\n" + "=" * 80)
-    print("3. MIXED-INTEGER PROGRAMMING MODEL (Inventory Allocation)")
-    print("=" * 80)
+    # Total Inventory Costs
+    eoq_results['annual_ordering_cost'] = (eoq_results['annual_demand'] / eoq_results['eoq'].replace(0, 1)) * ordering_cost
+    eoq_results['annual_holding_cost'] = (eoq_results['eoq'] / 2 + eoq_results['safety_stock']) * eoq_results['holding_cost']
+    eoq_results['total_inventory_cost'] = eoq_results['annual_ordering_cost'] + eoq_results['annual_holding_cost']
     
-    # Simulate warehouse locations
-    countries = df['country'].unique()[:5]  # Top 5 countries as warehouses
-    categories = df['category'].unique()
+    # Display top results
+    print("\n[EOQ PRESCRIPTIONS] Top 10 Products:")
+    print("-" * 100)
     
-    # Build demand matrix
-    demand_matrix = df[df['country'].isin(countries)].groupby(['country', 'category']).agg({
-        'product_id': 'count',
-        'total_sales': 'sum',
-        'current_price': 'mean'
-    }).rename(columns={'product_id': 'demand'})
-    
-    # Assume warehouse capacity and costs
-    warehouse_capacity = 500  # Units per warehouse
-    transportation_cost_per_unit = 5
-    warehouse_cost_per_unit = 2
-    
-    print(f"\nOptimization Constraints:")
-    print(f"  - Warehouses: {len(countries)}")
-    print(f"  - Product categories: {len(categories)}")
-    print(f"  - Warehouse capacity: {warehouse_capacity} units")
-    print(f"  - Transportation cost: ${transportation_cost_per_unit}/unit")
-    print(f"  - Warehouse cost: ${warehouse_cost_per_unit}/unit")
-    
-    # Calculate allocation metrics
-    results = []
-    total_demand = 0
-    total_allocation = 0
-    
-    for country in countries:
-        country_data = df[df['country'] == country]
-        country_demand = len(country_data)
-        total_demand += country_demand
-        
-        # Optimal allocation proportional to demand
-        country_allocation = min(country_demand, warehouse_capacity)
-        total_allocation += country_allocation
-        
-        avg_price = country_data['current_price'].mean()
-        total_cost = (country_allocation * (warehouse_cost_per_unit + transportation_cost_per_unit))
-        revenue = country_allocation * avg_price
-        profit = revenue - total_cost
-        
-        results.append({
-            'Warehouse': country,
-            'Demand': country_demand,
-            'Allocation': country_allocation,
-            'Capacity_Used_%': (country_allocation / warehouse_capacity) * 100,
-            'Revenue': revenue,
-            'Cost': total_cost,
-            'Profit': profit
-        })
-    
-    mip_results = pd.DataFrame(results)
-    
-    print("\nMIP Allocation Results:")
-    print(mip_results.to_string(index=False))
-    print(f"\nTotal demand: {total_demand} units")
-    print(f"Total allocation: {total_allocation} units")
-    print(f"Overall utilization: {(total_allocation/len(countries)/warehouse_capacity)*100:.1f}%")
+    top_products = eoq_results.nlargest(10, 'annual_demand')
+    for _, row in top_products.iterrows():
+        print(f"\nProduct: {row['product_id']} ({row['category']})")
+        print(f"  Annual Demand: {row['annual_demand']:.0f} units")
+        print(f"  Optimal Order Quantity (EOQ): {row['eoq']:.0f} units")
+        print(f"  Safety Stock: {row['safety_stock']:.0f} units")
+        print(f"  Reorder Point: {row['reorder_point']:.0f} units")
+        print(f"  Total Annual Cost: ${row['total_inventory_cost']:.2f}")
     
     # Visualization
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Plot 1: Demand vs Allocation
-    x_pos = np.arange(len(mip_results))
-    width = 0.35
-    axes[0, 0].bar(x_pos - width/2, mip_results['Demand'], width, label='Demand', color='#3498db')
-    axes[0, 0].bar(x_pos + width/2, mip_results['Allocation'], width, label='Allocation', color='#2ecc71')
-    axes[0, 0].axhline(y=warehouse_capacity, color='red', linestyle='--', label='Capacity')
-    axes[0, 0].set_ylabel('Units', fontweight='bold')
-    axes[0, 0].set_title('Demand vs Optimal Allocation', fontweight='bold', fontsize=12)
-    axes[0, 0].set_xticks(x_pos)
-    axes[0, 0].set_xticklabels(mip_results['Warehouse'])
-    axes[0, 0].legend()
-    axes[0, 0].grid(axis='y', alpha=0.3)
+    top_20 = eoq_results.nlargest(20, 'annual_demand')
     
-    # Plot 2: Capacity utilization
-    axes[0, 1].barh(range(len(mip_results)), mip_results['Capacity_Used_%'].values, color='#f39c12')
-    axes[0, 1].set_yticks(range(len(mip_results)))
-    axes[0, 1].set_yticklabels(mip_results['Warehouse'])
-    axes[0, 1].set_xlabel('Capacity Utilization (%)', fontweight='bold')
-    axes[0, 1].set_title('Warehouse Capacity Utilization', fontweight='bold', fontsize=12)
+    axes[0, 0].barh(range(len(top_20)), top_20['eoq'].values, color='steelblue')
+    axes[0, 0].set_yticks(range(len(top_20)))
+    axes[0, 0].set_yticklabels([str(p)[:15] for p in top_20['product_id']])
+    axes[0, 0].set_xlabel('EOQ (units)')
+    axes[0, 0].set_title('MODEL: Economic Order Quantity by Product', fontweight='bold')
+    axes[0, 0].grid(axis='x', alpha=0.3)
+    
+    axes[0, 1].barh(range(len(top_20)), top_20['safety_stock'].values, color='#f39c12')
+    axes[0, 1].set_yticks(range(len(top_20)))
+    axes[0, 1].set_yticklabels([str(p)[:15] for p in top_20['product_id']])
+    axes[0, 1].set_xlabel('Safety Stock (units)')
+    axes[0, 1].set_title('MODEL: Safety Stock for 95% Service Level', fontweight='bold')
     axes[0, 1].grid(axis='x', alpha=0.3)
     
-    # Plot 3: Revenue vs Cost
-    x_pos = np.arange(len(mip_results))
+    x_pos = np.arange(len(top_20))
     width = 0.35
-    axes[1, 0].bar(x_pos - width/2, mip_results['Revenue'], width, label='Revenue', color='#2ecc71')
-    axes[1, 0].bar(x_pos + width/2, mip_results['Cost'], width, label='Cost', color='#e74c3c')
-    axes[1, 0].set_ylabel('Amount ($)', fontweight='bold')
-    axes[1, 0].set_title('Revenue vs Total Cost by Warehouse', fontweight='bold', fontsize=12)
+    axes[1, 0].bar(x_pos - width/2, top_20['annual_ordering_cost'], width, label='Ordering Cost', color='#e74c3c')
+    axes[1, 0].bar(x_pos + width/2, top_20['annual_holding_cost'], width, label='Holding Cost', color='#3498db')
+    axes[1, 0].set_ylabel('Annual Cost ($)')
+    axes[1, 0].set_title('MODEL: EOQ Cost Components', fontweight='bold')
     axes[1, 0].set_xticks(x_pos)
-    axes[1, 0].set_xticklabels(mip_results['Warehouse'])
+    axes[1, 0].set_xticklabels([str(p)[:8] for p in top_20['product_id']], rotation=45, ha='right')
     axes[1, 0].legend()
     axes[1, 0].grid(axis='y', alpha=0.3)
     
-    # Plot 4: Profit
-    axes[1, 1].bar(range(len(mip_results)), mip_results['Profit'].values, color='#9b59b6')
-    axes[1, 1].set_ylabel('Profit ($)', fontweight='bold')
-    axes[1, 1].set_title('Profit by Warehouse', fontweight='bold', fontsize=12)
-    axes[1, 1].set_xticks(range(len(mip_results)))
-    axes[1, 1].set_xticklabels(mip_results['Warehouse'], rotation=45, ha='right')
-    axes[1, 1].grid(axis='y', alpha=0.3)
+    # Cost curve for sample product
+    sample = top_20.iloc[0]
+    Q_range = np.linspace(1, sample['eoq'] * 3, 100)
+    ordering = (sample['annual_demand'] / Q_range) * ordering_cost
+    holding = (Q_range / 2) * sample['holding_cost']
+    total = ordering + holding
+    
+    axes[1, 1].plot(Q_range, ordering, 'r--', label='Ordering Cost', linewidth=2)
+    axes[1, 1].plot(Q_range, holding, 'b--', label='Holding Cost', linewidth=2)
+    axes[1, 1].plot(Q_range, total, 'g-', label='Total Cost', linewidth=3)
+    axes[1, 1].axvline(x=sample['eoq'], color='black', linestyle=':', linewidth=2, label=f"EOQ = {sample['eoq']:.0f}")
+    axes[1, 1].set_xlabel('Order Quantity')
+    axes[1, 1].set_ylabel('Annual Cost ($)')
+    axes[1, 1].set_title(f"MODEL: EOQ Cost Trade-off (Product: {str(sample['product_id'])[:15]})", fontweight='bold')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('mip_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig('Prescriptive_Analytics/model_eoq.png', dpi=300, bbox_inches='tight')
     plt.show()
-    print("✓ MIP visualization saved as 'mip_analysis.png'")
     
-    return mip_results
+    return eoq_results
 
-# ============================================================================
-# 4. STOCHASTIC OPTIMIZATION MODEL
-# ============================================================================
-def stochastic_optimization(df):
+
+# =============================================================================
+# MODEL 2: NEWSVENDOR MODEL
+# Single-period stochastic inventory model
+# =============================================================================
+
+def model_newsvendor(df, product_demand):
     """
-    Stochastic optimization for demand uncertainty
-    Uses Monte Carlo simulation and chance constraints
-    """
-    print("\n" + "=" * 80)
-    print("4. STOCHASTIC OPTIMIZATION MODEL (Demand Uncertainty)")
-    print("=" * 80)
+    Newsvendor Model (Single-Period Inventory)
     
-    # Calculate daily demand by category
-    daily_category_demand = df.groupby(['category', df['purchase_date'].dt.date])['product_id'].count().reset_index()
-    daily_category_demand.columns = ['category', 'date', 'demand']
+    Formula: Q* = F^(-1)(Cu / (Cu + Co))
+    Where:
+        Cu = Cost of underage (lost profit from stockout)
+        Co = Cost of overage (loss from excess inventory)
+        F^(-1) = Inverse CDF of demand distribution
+    
+    This model determines optimal order quantity for perishable goods
+    or single-period decisions under demand uncertainty.
+    """
+    print("\n" + "=" * 100)
+    print("MODEL 2: NEWSVENDOR MODEL")
+    print("Objective: Optimize single-period inventory under demand uncertainty")
+    print("=" * 100)
+    
+    register_model("Stochastic Models", "Newsvendor Model",
+                   "Optimal order quantity for single-period inventory under demand uncertainty")
+    
+    # Parameters
+    gross_margin = 0.40  # 40% margin
+    salvage_rate = 0.20  # Can recover 20% of cost for excess inventory
+    
+    newsvendor_results = product_demand.copy()
+    
+    # Cost calculations
+    newsvendor_results['unit_cost'] = newsvendor_results['avg_price'] * (1 - gross_margin)
+    newsvendor_results['underage_cost'] = newsvendor_results['avg_price'] - newsvendor_results['unit_cost']  # Cu = profit margin
+    newsvendor_results['overage_cost'] = newsvendor_results['unit_cost'] * (1 - salvage_rate)  # Co = cost - salvage
+    
+    # Critical ratio
+    newsvendor_results['critical_ratio'] = (
+        newsvendor_results['underage_cost'] / 
+        (newsvendor_results['underage_cost'] + newsvendor_results['overage_cost'])
+    )
+    
+    # Optimal order quantity (assuming normal distribution)
+    newsvendor_results['optimal_quantity'] = (
+        newsvendor_results['mean_daily_demand'] + 
+        norm.ppf(newsvendor_results['critical_ratio']) * newsvendor_results['std_daily_demand']
+    )
+    newsvendor_results['optimal_quantity'] = newsvendor_results['optimal_quantity'].clip(lower=0)
+    
+    # Expected profit calculation
+    def expected_profit(row):
+        Q = row['optimal_quantity']
+        mu = row['mean_daily_demand']
+        sigma = row['std_daily_demand']
+        Cu = row['underage_cost']
+        Co = row['overage_cost']
+        
+        if sigma <= 0:
+            return Q * Cu - max(0, Q - mu) * (Cu + Co)
+        
+        # Expected sales
+        z = (Q - mu) / sigma
+        expected_sales = mu - sigma * (norm.pdf(z) - z * (1 - norm.cdf(z)))
+        expected_leftover = Q - expected_sales
+        
+        profit = Cu * expected_sales - Co * expected_leftover
+        return profit
+    
+    newsvendor_results['expected_profit'] = newsvendor_results.apply(expected_profit, axis=1)
+    
+    # Service level achieved
+    newsvendor_results['achieved_service_level'] = newsvendor_results['critical_ratio']
+    
+    # Display results
+    print("\n[NEWSVENDOR PRESCRIPTIONS] Top 10 Products:")
+    print("-" * 100)
+    
+    top_products = newsvendor_results.nlargest(10, 'expected_profit')
+    for _, row in top_products.iterrows():
+        print(f"\nProduct: {row['product_id']} ({row['category']})")
+        print(f"  Mean Demand: {row['mean_daily_demand']:.1f} units")
+        print(f"  Demand Std Dev: {row['std_daily_demand']:.1f} units")
+        print(f"  Critical Ratio: {row['critical_ratio']:.3f}")
+        print(f"  Optimal Order Quantity: {row['optimal_quantity']:.0f} units")
+        print(f"  Expected Daily Profit: ${row['expected_profit']:.2f}")
+        print(f"  Service Level: {row['achieved_service_level']*100:.1f}%")
+    
+    # Visualization
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    top_20 = newsvendor_results.nlargest(20, 'expected_profit')
+    
+    axes[0, 0].barh(range(len(top_20)), top_20['optimal_quantity'].values, color='#2ecc71')
+    axes[0, 0].set_yticks(range(len(top_20)))
+    axes[0, 0].set_yticklabels([str(p)[:15] for p in top_20['product_id']])
+    axes[0, 0].set_xlabel('Optimal Quantity (units)')
+    axes[0, 0].set_title('MODEL: Newsvendor Optimal Order Quantity', fontweight='bold')
+    axes[0, 0].grid(axis='x', alpha=0.3)
+    
+    axes[0, 1].barh(range(len(top_20)), top_20['critical_ratio'].values, color='#9b59b6')
+    axes[0, 1].set_yticks(range(len(top_20)))
+    axes[0, 1].set_yticklabels([str(p)[:15] for p in top_20['product_id']])
+    axes[0, 1].set_xlabel('Critical Ratio')
+    axes[0, 1].set_title('MODEL: Critical Ratio (Cu / (Cu + Co))', fontweight='bold')
+    axes[0, 1].axvline(x=0.5, color='red', linestyle='--', label='Break-even')
+    axes[0, 1].legend()
+    axes[0, 1].grid(axis='x', alpha=0.3)
+    
+    # Profit vs Quantity curve for sample product
+    sample = top_20.iloc[0]
+    Q_range = np.linspace(0, sample['mean_daily_demand'] * 3, 100)
+    profits = []
+    for Q in Q_range:
+        mu, sigma = sample['mean_daily_demand'], sample['std_daily_demand']
+        Cu, Co = sample['underage_cost'], sample['overage_cost']
+        if sigma > 0:
+            z = (Q - mu) / sigma
+            exp_sales = mu - sigma * (norm.pdf(z) - z * (1 - norm.cdf(z)))
+            profit = Cu * exp_sales - Co * (Q - exp_sales)
+        else:
+            profit = Cu * min(Q, mu) - Co * max(0, Q - mu)
+        profits.append(profit)
+    
+    axes[1, 0].plot(Q_range, profits, 'g-', linewidth=2)
+    axes[1, 0].axvline(x=sample['optimal_quantity'], color='red', linestyle='--', 
+                       label=f"Q* = {sample['optimal_quantity']:.0f}")
+    axes[1, 0].axvline(x=sample['mean_daily_demand'], color='blue', linestyle=':', 
+                       label=f"Mean = {sample['mean_daily_demand']:.0f}")
+    axes[1, 0].set_xlabel('Order Quantity')
+    axes[1, 0].set_ylabel('Expected Profit ($)')
+    axes[1, 0].set_title(f"MODEL: Newsvendor Profit Curve", fontweight='bold')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Service level distribution (robust version)
+    # Drop NaN and infinite values to avoid histogram errors
+    service_levels = newsvendor_results['achieved_service_level'].replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna()
+
+    if service_levels.empty:
+        # No valid data — just show a message
+        axes[1, 1].text(
+            0.5, 0.5,
+            "No valid service level data",
+            ha='center', va='center',
+            transform=axes[1, 1].transAxes
+        )
+    else:
+        data_min = service_levels.min()
+        data_max = service_levels.max()
+        n_unique = service_levels.nunique()
+
+        # If all values are (almost) the same, histogram will break.
+        # Use a single bar instead.
+        if np.isclose(data_min, data_max):
+            axes[1, 1].bar(
+                [service_levels.iloc[0]],
+                [len(service_levels)],
+                width=0.02,
+                color='steelblue',
+                edgecolor='white'
+            )
+        else:
+            # Choose a safe number of bins based on unique values
+            n_bins = min(30, max(1, int(n_unique)))
+            axes[1, 1].hist(
+                service_levels,
+                bins=n_bins,
+                color='steelblue',
+                edgecolor='white'
+            )
+
+        # Mean line
+        mean_sl = service_levels.mean()
+        axes[1, 1].axvline(
+            x=mean_sl,
+            color='red',
+            linestyle='--',
+            linewidth=2,
+            label=f"Mean: {mean_sl:.2f}"
+        )
+
+        axes[1, 1].set_xlabel('Critical Ratio / Service Level')
+        axes[1, 1].set_ylabel('Frequency')
+        axes[1, 1].set_title('MODEL: Distribution of Optimal Service Levels', fontweight='bold')
+        axes[1, 1].legend()
+
+    
+    return newsvendor_results
+
+
+# =============================================================================
+# MODEL 3: MIXED-INTEGER PROGRAMMING (MIP)
+# Optimal assortment and inventory allocation
+# =============================================================================
+
+def model_mip_assortment(df, product_demand, category_demand):
+    """
+    Mixed-Integer Programming (MIP) for Assortment Optimization
+    
+    Maximize: Sum(revenue_i * x_i)
+    Subject to:
+        - Sum(space_i * x_i) <= total_space (shelf space constraint)
+        - Sum(cost_i * x_i) <= budget (budget constraint)
+        - x_i in {0, 1} (binary: include or exclude product)
+    
+    This model determines which products to include in assortment
+    to maximize revenue subject to space and budget constraints.
+    """
+    print("\n" + "=" * 100)
+    print("MODEL 3: MIXED-INTEGER PROGRAMMING (MIP)")
+    print("Objective: Optimize product assortment subject to constraints")
+    print("=" * 100)
+    
+    register_model("Optimization Models", "Mixed-Integer Programming (MIP)",
+                   "Binary optimization for product assortment decisions")
+    
+    # Prepare data for MIP
+    mip_data = product_demand.copy()
+    
+    # Simulate space and cost requirements
+    np.random.seed(42)
+    mip_data['space_required'] = np.random.uniform(1, 5, len(mip_data))  # Shelf units
+    mip_data['inventory_cost'] = mip_data['avg_price'] * mip_data['mean_daily_demand'] * 30  # Monthly inventory cost
+    mip_data['contribution_margin'] = mip_data['total_revenue'] * 0.35  # 35% margin
+    
+    # Constraints
+    total_space = mip_data['space_required'].sum() * 0.6  # Can only use 60% of total space
+    total_budget = mip_data['inventory_cost'].sum() * 0.5  # 50% of total inventory budget
+    
+    # For demonstration, we'll use a greedy heuristic approximation
+    # (Full MIP would require pulp or scipy.optimize.milp)
+    
+    # Calculate efficiency score
+    mip_data['efficiency_score'] = mip_data['contribution_margin'] / (
+        mip_data['space_required'] + mip_data['inventory_cost'] / 1000
+    )
+    
+    # Sort by efficiency and select products
+    mip_data_sorted = mip_data.sort_values('efficiency_score', ascending=False)
+    
+    selected_products = []
+    remaining_space = total_space
+    remaining_budget = total_budget
+    
+    for _, row in mip_data_sorted.iterrows():
+        if row['space_required'] <= remaining_space and row['inventory_cost'] <= remaining_budget:
+            selected_products.append(row['product_id'])
+            remaining_space -= row['space_required']
+            remaining_budget -= row['inventory_cost']
+    
+    mip_data['selected'] = mip_data['product_id'].isin(selected_products).astype(int)
+    
+    # Results
+    selected_df = mip_data[mip_data['selected'] == 1]
+    excluded_df = mip_data[mip_data['selected'] == 0]
+    
+    print(f"\n[MIP RESULTS]")
+    print(f"  Total Products: {len(mip_data)}")
+    print(f"  Selected Products: {len(selected_df)}")
+    print(f"  Excluded Products: {len(excluded_df)}")
+    print(f"  Space Utilization: {(total_space - remaining_space) / total_space * 100:.1f}%")
+    print(f"  Budget Utilization: {(total_budget - remaining_budget) / total_budget * 100:.1f}%")
+    print(f"  Total Contribution Margin: ${selected_df['contribution_margin'].sum():,.2f}")
+    
+    print("\n[MIP PRESCRIPTIONS] Top 10 Selected Products:")
+    print("-" * 100)
+    for _, row in selected_df.nlargest(10, 'contribution_margin').iterrows():
+        print(f"  {row['product_id']}: Margin=${row['contribution_margin']:.0f}, Space={row['space_required']:.1f}")
+    
+    print("\n[MIP PRESCRIPTIONS] Top 10 Products to Exclude:")
+    print("-" * 100)
+    for _, row in excluded_df.nsmallest(10, 'efficiency_score').iterrows():
+        print(f"  {row['product_id']}: Efficiency Score={row['efficiency_score']:.2f}")
+    
+    # Visualization
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # Plot 1: Selected vs Excluded Distribution
+    selection_counts = mip_data['selected'].value_counts()
+    axes[0, 0].pie([selection_counts.get(1, 0), selection_counts.get(0, 0)], 
+                   labels=['Selected', 'Excluded'], autopct='%1.1f%%',
+                   colors=['#2ecc71', '#e74c3c'])
+    axes[0, 0].set_title('MODEL: MIP Assortment Selection', fontweight='bold')
+    
+    # Plot 2: Efficiency Score Distribution
+    axes[0, 1].hist(mip_data[mip_data['selected']==1]['efficiency_score'], bins=20, 
+                    alpha=0.7, label='Selected', color='#2ecc71')
+    axes[0, 1].hist(mip_data[mip_data['selected']==0]['efficiency_score'], bins=20, 
+                    alpha=0.7, label='Excluded', color='#e74c3c')
+    axes[0, 1].set_xlabel('Efficiency Score')
+    axes[0, 1].set_ylabel('Frequency')
+    axes[0, 1].set_title('MODEL: Efficiency Score by Selection', fontweight='bold')
+    axes[0, 1].legend()
+    
+    # Plot 3: Space vs Margin (bubble chart)
+    colors = ['#2ecc71' if s == 1 else '#e74c3c' for s in mip_data['selected']]
+    axes[1, 0].scatter(mip_data['space_required'], mip_data['contribution_margin']/1000,
+                       c=colors, alpha=0.6, s=50)
+    axes[1, 0].set_xlabel('Space Required (units)')
+    axes[1, 0].set_ylabel('Contribution Margin ($K)')
+    axes[1, 0].set_title('MODEL: Space vs Margin Trade-off', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Plot 4: Category breakdown of selection
+    cat_selection = mip_data.groupby('category').agg({
+        'selected': 'sum',
+        'product_id': 'count'
+    })
+    cat_selection['selection_rate'] = cat_selection['selected'] / cat_selection['product_id'] * 100
+    cat_selection_sorted = cat_selection.sort_values('selection_rate')
+    
+    axes[1, 1].barh(range(len(cat_selection_sorted)), cat_selection_sorted['selection_rate'].values, 
+                    color='steelblue')
+    axes[1, 1].set_yticks(range(len(cat_selection_sorted)))
+    axes[1, 1].set_yticklabels(cat_selection_sorted.index)
+    axes[1, 1].set_xlabel('Selection Rate (%)')
+    axes[1, 1].set_title('MODEL: MIP Selection Rate by Category', fontweight='bold')
+    axes[1, 1].grid(axis='x', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('Prescriptive_Analytics/model_mip.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    return mip_data
+
+
+# =============================================================================
+# MODEL 4: STOCHASTIC OPTIMIZATION
+# Multi-scenario inventory optimization under uncertainty
+# =============================================================================
+
+def model_stochastic_optimization(df, product_demand):
+    """
+    Stochastic Optimization (Two-Stage)
+    
+    Stage 1: Determine order quantity before demand is known
+    Stage 2: Observe demand, make recourse decisions
+    
+    Minimize: E[ordering_cost + holding_cost + shortage_cost]
+    
+    This model optimizes decisions under multiple demand scenarios,
+    accounting for uncertainty in demand forecasts.
+    """
+    print("\n" + "=" * 100)
+    print("MODEL 4: STOCHASTIC OPTIMIZATION")
+    print("Objective: Optimize inventory under demand uncertainty (multi-scenario)")
+    print("=" * 100)
+    
+    register_model("Stochastic Models", "Stochastic Optimization (Two-Stage)",
+                   "Multi-scenario optimization under demand uncertainty")
+    
+    # Parameters
+    n_scenarios = 1000
+    ordering_cost = 50
+    holding_cost_rate = 0.02  # Per unit per day
+    shortage_cost_rate = 0.10  # Per unit per day (higher than holding)
     
     stochastic_results = []
     
-    for category in df['category'].unique():
-        cat_demand = daily_category_demand[daily_category_demand['category'] == category]['demand'].values
+    # Analyze top products
+    top_products = product_demand.nlargest(30, 'total_revenue')
+    
+    for _, product in top_products.iterrows():
+        mu = product['mean_daily_demand']
+        sigma = product['std_daily_demand']
+        price = product['avg_price']
         
-        if len(cat_demand) < 2:
-            continue
+        if sigma <= 0:
+            sigma = mu * 0.3
         
-        mean_demand = np.mean(cat_demand)
-        std_demand = np.std(cat_demand)
-        min_demand = np.min(cat_demand)
-        max_demand = np.max(cat_demand)
-        
-        # Monte Carlo simulation (1000 scenarios)
+        # Generate demand scenarios
         np.random.seed(42)
-        simulated_demands = np.random.normal(mean_demand, std_demand, 1000)
-        simulated_demands = np.maximum(simulated_demands, 0)  # Ensure non-negative
+        demand_scenarios = np.maximum(0, np.random.normal(mu, sigma, n_scenarios))
         
-        # Calculate safety stock for 95% service level (1.645 z-score)
-        safety_stock = 1.645 * std_demand
-        optimal_stock = mean_demand + safety_stock
+        # Evaluate different order quantities
+        Q_candidates = np.linspace(max(1, mu - 2*sigma), mu + 3*sigma, 50)
         
-        # Risk metrics
-        stockout_risk_10 = np.sum(simulated_demands > optimal_stock * 1.1) / len(simulated_demands)
-        shortage_cost_rate = 50  # Cost per unit short
-        expected_shortage = np.mean(np.maximum(simulated_demands - optimal_stock, 0))
+        best_Q = mu
+        best_cost = float('inf')
+        
+        for Q in Q_candidates:
+            scenario_costs = []
+            for d in demand_scenarios:
+                # Stage 2 recourse
+                if d <= Q:
+                    # Excess inventory
+                    holding = (Q - d) * price * holding_cost_rate
+                    shortage = 0
+                else:
+                    # Shortage
+                    holding = 0
+                    shortage = (d - Q) * price * shortage_cost_rate
+                
+                total = ordering_cost + holding + shortage
+                scenario_costs.append(total)
+            
+            avg_cost = np.mean(scenario_costs)
+            if avg_cost < best_cost:
+                best_cost = avg_cost
+                best_Q = Q
+        
+        # Calculate risk metrics
+        final_costs = []
+        for d in demand_scenarios:
+            if d <= best_Q:
+                cost = ordering_cost + (best_Q - d) * price * holding_cost_rate
+            else:
+                cost = ordering_cost + (d - best_Q) * price * shortage_cost_rate
+            final_costs.append(cost)
         
         stochastic_results.append({
-            'Category': category,
-            'Mean_Demand': mean_demand,
-            'Std_Dev': std_demand,
-            'Min_Demand': min_demand,
-            'Max_Demand': max_demand,
-            'Optimal_Stock': optimal_stock,
-            'Safety_Stock': safety_stock,
-            'Expected_Shortage': expected_shortage,
-            'Stockout_Risk_%': stockout_risk_10 * 100,
-            'Expected_Shortage_Cost': expected_shortage * shortage_cost_rate
+            'product_id': product['product_id'],
+            'category': product['category'],
+            'mean_demand': mu,
+            'std_demand': sigma,
+            'optimal_order': best_Q,
+            'expected_cost': best_cost,
+            'cost_std': np.std(final_costs),
+            'var_95': np.percentile(final_costs, 95),  # Value at Risk
+            'cvar_95': np.mean([c for c in final_costs if c >= np.percentile(final_costs, 95)])  # CVaR
         })
     
-    stoch_df = pd.DataFrame(stochastic_results)
+    stochastic_df = pd.DataFrame(stochastic_results)
     
-    print("\nStochastic Optimization Results:")
-    print(stoch_df.to_string(index=False))
+    print("\n[STOCHASTIC OPTIMIZATION PRESCRIPTIONS] Top 10 Products:")
+    print("-" * 100)
+    
+    for _, row in stochastic_df.head(10).iterrows():
+        print(f"\nProduct: {row['product_id']} ({row['category']})")
+        print(f"  Mean Demand: {row['mean_demand']:.1f} units")
+        print(f"  Optimal Order (Stochastic): {row['optimal_order']:.0f} units")
+        print(f"  Expected Daily Cost: ${row['expected_cost']:.2f}")
+        print(f"  Cost Std Dev: ${row['cost_std']:.2f}")
+        print(f"  95% VaR: ${row['var_95']:.2f}")
+        print(f"  95% CVaR: ${row['cvar_95']:.2f}")
     
     # Visualization
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Plot 1: Demand distribution
-    sample_category = stoch_df.iloc[0]['Category']
-    cat_demand = daily_category_demand[daily_category_demand['category'] == sample_category]['demand'].values
-    axes[0, 0].hist(cat_demand, bins=15, color='#3498db', edgecolor='black', alpha=0.7)
-    axes[0, 0].axvline(np.mean(cat_demand), color='red', linestyle='--', linewidth=2, label='Mean')
-    axes[0, 0].set_xlabel('Daily Demand (units)', fontweight='bold')
-    axes[0, 0].set_ylabel('Frequency', fontweight='bold')
-    axes[0, 0].set_title(f'Demand Distribution - {sample_category}', fontweight='bold', fontsize=12)
+    # Plot 1: Optimal Order vs Mean Demand
+    axes[0, 0].scatter(stochastic_df['mean_demand'], stochastic_df['optimal_order'], 
+                       c='steelblue', s=100, alpha=0.7)
+    max_val = max(stochastic_df['mean_demand'].max(), stochastic_df['optimal_order'].max())
+    axes[0, 0].plot([0, max_val], [0, max_val], 'r--', label='Order = Demand')
+    axes[0, 0].set_xlabel('Mean Demand')
+    axes[0, 0].set_ylabel('Optimal Order Quantity')
+    axes[0, 0].set_title('MODEL: Stochastic Optimal Order vs Mean Demand', fontweight='bold')
     axes[0, 0].legend()
-    axes[0, 0].grid(axis='y', alpha=0.3)
+    axes[0, 0].grid(True, alpha=0.3)
     
-    # Plot 2: Optimal stock levels
-    axes[0, 1].barh(range(len(stoch_df)), stoch_df['Optimal_Stock'], color='#2ecc71')
-    axes[0, 1].set_yticks(range(len(stoch_df)))
-    axes[0, 1].set_yticklabels(stoch_df['Category'])
-    axes[0, 1].set_xlabel('Optimal Stock Level (units)', fontweight='bold')
-    axes[0, 1].set_title('Recommended Safety Stock Levels', fontweight='bold', fontsize=12)
-    axes[0, 1].grid(axis='x', alpha=0.3)
+    # Plot 2: Risk Metrics (VaR vs CVaR)
+    axes[0, 1].scatter(stochastic_df['var_95'], stochastic_df['cvar_95'], 
+                       c='#e74c3c', s=100, alpha=0.7)
+    axes[0, 1].plot([stochastic_df['var_95'].min(), stochastic_df['var_95'].max()],
+                    [stochastic_df['var_95'].min(), stochastic_df['var_95'].max()], 'k--')
+    axes[0, 1].set_xlabel('95% Value at Risk ($)')
+    axes[0, 1].set_ylabel('95% Conditional VaR ($)')
+    axes[0, 1].set_title('MODEL: Risk Analysis (VaR vs CVaR)', fontweight='bold')
+    axes[0, 1].grid(True, alpha=0.3)
     
-    # Plot 3: Safety stock
-    axes[0, 2].bar(range(len(stoch_df)), stoch_df['Safety_Stock'].values, color='#f39c12')
-    axes[0, 2].set_ylabel('Safety Stock (units)', fontweight='bold')
-    axes[0, 2].set_title('Safety Stock Buffer', fontweight='bold', fontsize=12)
-    axes[0, 2].set_xticks(range(len(stoch_df)))
-    axes[0, 2].set_xticklabels(stoch_df['Category'], rotation=45, ha='right')
-    axes[0, 2].grid(axis='y', alpha=0.3)
+    # Plot 3: Cost Distribution for sample product
+    sample = top_products.iloc[0]
+    mu, sigma = sample['mean_daily_demand'], sample['std_daily_demand']
+    if sigma <= 0:
+        sigma = mu * 0.3
+    demand_scenarios = np.maximum(0, np.random.normal(mu, sigma, n_scenarios))
+    optimal_Q = stochastic_df.iloc[0]['optimal_order']
     
-    # Plot 4: Stockout risk
-    axes[1, 0].barh(range(len(stoch_df)), stoch_df['Stockout_Risk_%'], color='#e74c3c')
-    axes[1, 0].set_yticks(range(len(stoch_df)))
-    axes[1, 0].set_yticklabels(stoch_df['Category'])
-    axes[1, 0].set_xlabel('Stockout Risk (%)', fontweight='bold')
-    axes[1, 0].set_title('Risk of Stock Shortage', fontweight='bold', fontsize=12)
-    axes[1, 0].grid(axis='x', alpha=0.3)
+    costs = []
+    for d in demand_scenarios:
+        if d <= optimal_Q:
+            cost = ordering_cost + (optimal_Q - d) * sample['avg_price'] * holding_cost_rate
+        else:
+            cost = ordering_cost + (d - optimal_Q) * sample['avg_price'] * shortage_cost_rate
+        costs.append(cost)
     
-    # Plot 5: Expected shortage cost
-    axes[1, 1].bar(range(len(stoch_df)), stoch_df['Expected_Shortage_Cost'].values, color='#9b59b6')
-    axes[1, 1].set_ylabel('Expected Cost ($)', fontweight='bold')
-    axes[1, 1].set_title('Expected Shortage Cost', fontweight='bold', fontsize=12)
-    axes[1, 1].set_xticks(range(len(stoch_df)))
-    axes[1, 1].set_xticklabels(stoch_df['Category'], rotation=45, ha='right')
-    axes[1, 1].grid(axis='y', alpha=0.3)
+    axes[1, 0].hist(costs, bins=50, color='steelblue', edgecolor='white', alpha=0.7)
+    axes[1, 0].axvline(x=np.mean(costs), color='red', linestyle='--', linewidth=2, 
+                       label=f'Expected: ${np.mean(costs):.2f}')
+    axes[1, 0].axvline(x=np.percentile(costs, 95), color='orange', linestyle='--', linewidth=2,
+                       label=f'95% VaR: ${np.percentile(costs, 95):.2f}')
+    axes[1, 0].set_xlabel('Total Cost ($)')
+    axes[1, 0].set_ylabel('Frequency')
+    axes[1, 0].set_title('MODEL: Cost Distribution Under Uncertainty', fontweight='bold')
+    axes[1, 0].legend()
     
-    # Plot 6: Coefficient of variation
-    stoch_df['CV'] = stoch_df['Std_Dev'] / stoch_df['Mean_Demand']
-    axes[1, 2].barh(range(len(stoch_df)), stoch_df['CV'], color='#1abc9c')
-    axes[1, 2].set_yticks(range(len(stoch_df)))
-    axes[1, 2].set_yticklabels(stoch_df['Category'])
-    axes[1, 2].set_xlabel('Coefficient of Variation', fontweight='bold')
-    axes[1, 2].set_title('Demand Volatility', fontweight='bold', fontsize=12)
-    axes[1, 2].grid(axis='x', alpha=0.3)
+    # Plot 4: Expected Cost by Category
+    cat_costs = stochastic_df.groupby('category')['expected_cost'].mean().sort_values()
+    axes[1, 1].barh(range(len(cat_costs)), cat_costs.values, color='#2ecc71')
+    axes[1, 1].set_yticks(range(len(cat_costs)))
+    axes[1, 1].set_yticklabels(cat_costs.index)
+    axes[1, 1].set_xlabel('Expected Daily Cost ($)')
+    axes[1, 1].set_title('MODEL: Expected Cost by Category', fontweight='bold')
+    axes[1, 1].grid(axis='x', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('stochastic_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig('Prescriptive_Analytics/model_stochastic.png', dpi=300, bbox_inches='tight')
     plt.show()
-    print("✓ Stochastic optimization visualization saved as 'stochastic_analysis.png'")
     
-    return stoch_df
+    return stochastic_df
 
-# ============================================================================
-# 5. DYNAMIC PRICING OPTIMIZATION
-# ============================================================================
-def dynamic_pricing_optimization(df):
+
+# =============================================================================
+# MODEL 5: DYNAMIC PRICING OPTIMIZATION
+# Real-time price adjustment based on demand
+# =============================================================================
+
+def model_dynamic_pricing(df, product_demand):
     """
-    Dynamic pricing model that optimizes prices over time
-    Maximizes revenue based on demand elasticity and inventory levels
-    """
-    print("\n" + "=" * 80)
-    print("5. DYNAMIC PRICING OPTIMIZATION MODEL")
-    print("=" * 80)
+    Dynamic Pricing Optimization
     
-    # Group by category and date
-    df['date'] = df['purchase_date'].dt.date
-    daily_category = df.groupby(['category', 'date']).agg({
-        'current_price': 'mean',
-        'product_id': 'count',
-        'total_sales': 'sum'
-    }).reset_index()
-    daily_category.columns = ['category', 'date', 'price', 'quantity', 'revenue']
+    Maximize: Revenue = P(p) * D(p)
+    Where:
+        P(p) = price
+        D(p) = demand as function of price (price elasticity)
+    
+    Optimal Price: p* = c * e / (e - 1)
+    Where:
+        c = marginal cost
+        e = price elasticity of demand
+    
+    This model determines optimal prices based on demand elasticity
+    and can adjust prices dynamically based on inventory levels.
+    """
+    print("\n" + "=" * 100)
+    print("MODEL 5: DYNAMIC PRICING OPTIMIZATION")
+    print("Objective: Maximize revenue through optimal pricing")
+    print("=" * 100)
+    
+    register_model("Pricing Models", "Dynamic Pricing Optimization",
+                   "Optimize prices based on demand elasticity and inventory levels")
     
     pricing_results = []
     
+    # Estimate price elasticity by category
     for category in df['category'].unique():
-        cat_data = daily_category[daily_category['category'] == category].sort_values('date')
+        cat_data = df[df['category'] == category].copy()
         
-        if len(cat_data) < 3:
+        if len(cat_data) < 50:
             continue
         
-        # Calculate price elasticity
-        prices = cat_data['price'].values
-        quantities = cat_data['quantity'].values
+        # Calculate elasticity from discount response
+        # Using markdown as a proxy for price change
+        discount_data = cat_data[cat_data['markdown_percentage'] > 0]
+        no_discount_data = cat_data[cat_data['markdown_percentage'] == 0]
         
-        # Normalize for elasticity calculation
-        if len(prices) > 1:
-            price_changes = np.diff(prices) / prices[:-1]
-            quantity_changes = np.diff(quantities) / quantities[:-1]
+        if len(discount_data) > 10 and len(no_discount_data) > 10:
+            # Average quantity at different price points
+            q_discount = len(discount_data) / discount_data['current_price'].mean()
+            q_full = len(no_discount_data) / no_discount_data['current_price'].mean()
             
-            # Avoid division by zero
-            valid_idx = np.abs(price_changes) > 0.001
-            if np.sum(valid_idx) > 0:
-                elasticity = np.mean(quantity_changes[valid_idx] / price_changes[valid_idx])
+            p_discount = discount_data['current_price'].mean()
+            p_full = no_discount_data['current_price'].mean()
+            
+            # Price elasticity of demand
+            if p_full != p_discount and q_full > 0:
+                elasticity = ((q_discount - q_full) / q_full) / ((p_discount - p_full) / p_full)
+                elasticity = abs(elasticity)  # Elasticity is typically positive
             else:
-                elasticity = -1.0  # Default elasticity
+                elasticity = 1.5  # Default assumption
         else:
-            elasticity = -1.0
+            elasticity = 1.5
         
-        # Current metrics
-        current_price = prices[-1]
-        current_qty = quantities[-1]
-        current_revenue = cat_data['revenue'].iloc[-1]
+        # Ensure reasonable elasticity range
+        elasticity = max(0.5, min(elasticity, 5.0))
         
-        # Optimal price calculation (revenue maximization)
-        # Assuming linear demand: Q = a + b*P, optimal P = -a/(2b)
-        # Estimate optimal price with elasticity
-        optimal_price = current_price * (1 + 1 / (2 * elasticity)) if elasticity != 0 else current_price
-        optimal_price = max(optimal_price, current_price * 0.7)  # Don't go below 70% of current
-        optimal_price = min(optimal_price, current_price * 1.3)  # Don't go above 130% of current
+        # Current pricing
+        avg_price = cat_data['current_price'].mean()
+        avg_original = cat_data['original_price'].mean()
+        margin = (avg_price - avg_original * 0.6) / avg_price  # Assume 60% COGS
+        marginal_cost = avg_original * 0.6
         
-        # Expected quantity at optimal price
-        price_ratio = optimal_price / current_price if current_price > 0 else 1
-        expected_qty = current_qty * (price_ratio ** elasticity)
-        expected_revenue = optimal_price * expected_qty
-        revenue_change = expected_revenue - current_revenue
-        revenue_change_pct = (revenue_change / current_revenue * 100) if current_revenue > 0 else 0
+        # Optimal price based on elasticity
+        if elasticity > 1:
+            optimal_price = marginal_cost * elasticity / (elasticity - 1)
+        else:
+            optimal_price = avg_price * 1.1  # If inelastic, can increase price
+        
+        # Price change recommendation
+        price_change_pct = (optimal_price - avg_price) / avg_price * 100
+        
+        # Expected revenue impact
+        if elasticity != 0:
+            quantity_change = -elasticity * price_change_pct / 100
+            revenue_change = (1 + price_change_pct/100) * (1 + quantity_change) - 1
+        else:
+            revenue_change = price_change_pct / 100
         
         pricing_results.append({
-            'Category': category,
-            'Current_Price': current_price,
-            'Optimal_Price': optimal_price,
-            'Price_Change_%': ((optimal_price - current_price) / current_price * 100) if current_price > 0 else 0,
-            'Price_Elasticity': elasticity,
-            'Current_Quantity': current_qty,
-            'Expected_Quantity': expected_qty,
-            'Current_Revenue': current_revenue,
-            'Expected_Revenue': expected_revenue,
-            'Revenue_Change_$': revenue_change,
-            'Revenue_Change_%': revenue_change_pct
+            'category': category,
+            'current_avg_price': avg_price,
+            'estimated_elasticity': elasticity,
+            'marginal_cost': marginal_cost,
+            'optimal_price': optimal_price,
+            'price_change_pct': price_change_pct,
+            'expected_revenue_change_pct': revenue_change * 100,
+            'current_margin': margin * 100,
+            'num_products': len(cat_data['product_id'].unique())
         })
     
     pricing_df = pd.DataFrame(pricing_results)
     
-    print("\nDynamic Pricing Optimization Results:")
-    print(pricing_df.to_string(index=False))
+    print("\n[DYNAMIC PRICING PRESCRIPTIONS]:")
+    print("-" * 100)
+    
+    for _, row in pricing_df.iterrows():
+        if row['price_change_pct'] > 5:
+            action = "INCREASE PRICE"
+        elif row['price_change_pct'] < -5:
+            action = "DECREASE PRICE"
+        else:
+            action = "MAINTAIN PRICE"
+        
+        print(f"\nCategory: {row['category']}")
+        print(f"  Current Avg Price: ${row['current_avg_price']:.2f}")
+        print(f"  Price Elasticity: {row['estimated_elasticity']:.2f}")
+        print(f"  Optimal Price: ${row['optimal_price']:.2f}")
+        print(f"  Recommended Change: {row['price_change_pct']:+.1f}%")
+        print(f"  Expected Revenue Impact: {row['expected_revenue_change_pct']:+.1f}%")
+        print(f"  PRESCRIPTION: {action}")
     
     # Visualization
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Plot 1: Price recommendations
-    x_pos = np.arange(len(pricing_df))
-    width = 0.35
-    axes[0, 0].bar(x_pos - width/2, pricing_df['Current_Price'], width, label='Current', color='#3498db')
-    axes[0, 0].bar(x_pos + width/2, pricing_df['Optimal_Price'], width, label='Optimal', color='#2ecc71')
-    axes[0, 0].set_ylabel('Price ($)', fontweight='bold')
-    axes[0, 0].set_title('Current vs Optimal Pricing', fontweight='bold', fontsize=12)
-    axes[0, 0].set_xticks(x_pos)
-    axes[0, 0].set_xticklabels(pricing_df['Category'], rotation=45, ha='right')
+    # Plot 1: Price Elasticity by Category
+    elasticity_sorted = pricing_df.sort_values('estimated_elasticity')
+    colors = ['#e74c3c' if e < 1 else '#f39c12' if e < 2 else '#2ecc71' 
+              for e in elasticity_sorted['estimated_elasticity']]
+    axes[0, 0].barh(range(len(elasticity_sorted)), elasticity_sorted['estimated_elasticity'].values, 
+                    color=colors)
+    axes[0, 0].axvline(x=1, color='black', linestyle='--', linewidth=2, label='Unit Elasticity')
+    axes[0, 0].set_yticks(range(len(elasticity_sorted)))
+    axes[0, 0].set_yticklabels(elasticity_sorted['category'])
+    axes[0, 0].set_xlabel('Price Elasticity of Demand')
+    axes[0, 0].set_title('MODEL: Estimated Price Elasticity by Category', fontweight='bold')
     axes[0, 0].legend()
-    axes[0, 0].grid(axis='y', alpha=0.3)
+    axes[0, 0].grid(axis='x', alpha=0.3)
     
-    # Plot 2: Price elasticity
-    colors = ['#e74c3c' if x < -1 else '#2ecc71' for x in pricing_df['Price_Elasticity']]
-    axes[0, 1].barh(range(len(pricing_df)), pricing_df['Price_Elasticity'].values, color=colors)
-    axes[0, 1].axvline(x=-1, color='red', linestyle='--', linewidth=2, label='Unit Elastic')
-    axes[0, 1].set_xticks(range(len(pricing_df)))
-    axes[0, 1].set_yticklabels(pricing_df['Category'])
-    axes[0, 1].set_xlabel('Elasticity', fontweight='bold')
-    axes[0, 1].set_title('Price Elasticity by Category', fontweight='bold', fontsize=12)
-    axes[0, 1].legend()
-    axes[0, 1].grid(axis='x', alpha=0.3)
-    
-    # Plot 3: Price change percentage
-    axes[0, 2].bar(range(len(pricing_df)), pricing_df['Price_Change_%'].values, 
-                   color=['#2ecc71' if x > 0 else '#e74c3c' for x in pricing_df['Price_Change_%']])
-    axes[0, 2].axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-    axes[0, 2].set_ylabel('Price Change (%)', fontweight='bold')
-    axes[0, 2].set_title('Recommended Price Adjustments', fontweight='bold', fontsize=12)
-    axes[0, 2].set_xticks(range(len(pricing_df)))
-    axes[0, 2].set_xticklabels(pricing_df['Category'], rotation=45, ha='right')
-    axes[0, 2].grid(axis='y', alpha=0.3)
-    
-    # Plot 4: Current revenue vs expected revenue
+    # Plot 2: Current vs Optimal Price
     x_pos = np.arange(len(pricing_df))
     width = 0.35
-    axes[1, 0].bar(x_pos - width/2, pricing_df['Current_Revenue'], width, label='Current', color='#3498db')
-    axes[1, 0].bar(x_pos + width/2, pricing_df['Expected_Revenue'], width, label='Expected', color='#2ecc71')
-    axes[1, 0].set_ylabel('Revenue ($)', fontweight='bold')
-    axes[1, 0].set_title('Current vs Expected Revenue', fontweight='bold', fontsize=12)
-    axes[1, 0].set_xticks(x_pos)
-    axes[1, 0].set_xticklabels(pricing_df['Category'], rotation=45, ha='right')
-    axes[1, 0].legend()
-    axes[1, 0].grid(axis='y', alpha=0.3)
+    axes[0, 1].bar(x_pos - width/2, pricing_df['current_avg_price'], width, 
+                   label='Current', color='#3498db')
+    axes[0, 1].bar(x_pos + width/2, pricing_df['optimal_price'], width, 
+                   label='Optimal', color='#2ecc71')
+    axes[0, 1].set_ylabel('Price ($)')
+    axes[0, 1].set_title('MODEL: Current vs Optimal Price', fontweight='bold')
+    axes[0, 1].set_xticks(x_pos)
+    axes[0, 1].set_xticklabels(pricing_df['category'], rotation=45, ha='right')
+    axes[0, 1].legend()
+    axes[0, 1].grid(axis='y', alpha=0.3)
     
-    # Plot 5: Revenue change
-    colors = ['#2ecc71' if x > 0 else '#e74c3c' for x in pricing_df['Revenue_Change_$']]
-    axes[1, 1].bar(range(len(pricing_df)), pricing_df['Revenue_Change_$'].values, color=colors)
-    axes[1, 1].axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-    axes[1, 1].set_ylabel('Revenue Change ($)', fontweight='bold')
-    axes[1, 1].set_title('Expected Revenue Impact', fontweight='bold', fontsize=12)
-    axes[1, 1].set_xticks(range(len(pricing_df)))
-    axes[1, 1].set_xticklabels(pricing_df['Category'], rotation=45, ha='right')
-    axes[1, 1].grid(axis='y', alpha=0.3)
+    # Plot 3: Price Change Recommendations
+    change_sorted = pricing_df.sort_values('price_change_pct')
+    colors = ['#e74c3c' if c < 0 else '#2ecc71' for c in change_sorted['price_change_pct']]
+    axes[1, 0].barh(range(len(change_sorted)), change_sorted['price_change_pct'].values, color=colors)
+    axes[1, 0].axvline(x=0, color='black', linestyle='-', linewidth=1)
+    axes[1, 0].set_yticks(range(len(change_sorted)))
+    axes[1, 0].set_yticklabels(change_sorted['category'])
+    axes[1, 0].set_xlabel('Price Change (%)')
+    axes[1, 0].set_title('PRESCRIPTION: Recommended Price Changes', fontweight='bold')
+    axes[1, 0].grid(axis='x', alpha=0.3)
     
-    # Plot 6: Revenue change percentage
-    axes[1, 2].barh(range(len(pricing_df)), pricing_df['Revenue_Change_%'].values, 
-                    color=['#2ecc71' if x > 0 else '#e74c3c' for x in pricing_df['Revenue_Change_%']])
-    axes[1, 2].axvline(x=0, color='black', linestyle='-', linewidth=0.5)
-    axes[1, 2].set_xticks(range(len(pricing_df)))
-    axes[1, 2].set_yticklabels(pricing_df['Category'])
-    axes[1, 2].set_xlabel('Revenue Change (%)', fontweight='bold')
-    axes[1, 2].set_title('Expected Revenue Uplift', fontweight='bold', fontsize=12)
-    axes[1, 2].grid(axis='x', alpha=0.3)
+    # Plot 4: Expected Revenue Impact
+    revenue_sorted = pricing_df.sort_values('expected_revenue_change_pct')
+    colors = ['#e74c3c' if r < 0 else '#2ecc71' for r in revenue_sorted['expected_revenue_change_pct']]
+    axes[1, 1].barh(range(len(revenue_sorted)), revenue_sorted['expected_revenue_change_pct'].values, 
+                    color=colors)
+    axes[1, 1].axvline(x=0, color='black', linestyle='-', linewidth=1)
+    axes[1, 1].set_yticks(range(len(revenue_sorted)))
+    axes[1, 1].set_yticklabels(revenue_sorted['category'])
+    axes[1, 1].set_xlabel('Expected Revenue Change (%)')
+    axes[1, 1].set_title('MODEL: Expected Revenue Impact', fontweight='bold')
+    axes[1, 1].grid(axis='x', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('dynamic_pricing_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig('Prescriptive_Analytics/model_dynamic_pricing.png', dpi=300, bbox_inches='tight')
     plt.show()
-    print("✓ Dynamic pricing visualization saved as 'dynamic_pricing_analysis.png'")
     
     return pricing_df
 
-# ============================================================================
-# 6. MARKDOWN OPTIMIZATION MODEL
-# ============================================================================
-def markdown_optimization(df):
+
+# =============================================================================
+# MODEL 6: MARKDOWN OPTIMIZATION
+# End-of-season clearance pricing
+# =============================================================================
+
+def model_markdown_optimization(df, product_demand):
     """
-    Markdown optimization to determine optimal discount levels
-    Balances volume increase against margin reduction
-    """
-    print("\n" + "=" * 80)
-    print("6. MARKDOWN OPTIMIZATION MODEL")
-    print("=" * 80)
+    Markdown Optimization Model
     
-    # Analyze discount impact by category
-    df['has_discount'] = df['markdown_percentage'] > 0
+    Objective: Maximize total revenue over markdown periods
+    
+    Revenue = Sum_t [P_t * D_t(P_t)]
+    Subject to:
+        - P_t >= P_{t+1} (prices can only decrease)
+        - Inventory constraints
+        - Minimum price constraints
+    
+    This model determines optimal markdown schedule to clear
+    inventory while maximizing total revenue.
+    """
+    print("\n" + "=" * 100)
+    print("MODEL 6: MARKDOWN OPTIMIZATION")
+    print("Objective: Optimize clearance pricing schedule")
+    print("=" * 100)
+    
+    register_model("Pricing Models", "Markdown Optimization",
+                   "Optimize end-of-season clearance pricing to maximize revenue")
     
     markdown_results = []
     
     for category in df['category'].unique():
         cat_data = df[df['category'] == category]
         
-        # Separate discounted and non-discounted
-        discounted = cat_data[cat_data['has_discount'] == True]
-        not_discounted = cat_data[cat_data['has_discount'] == False]
-        
-        if len(discounted) == 0 or len(not_discounted) == 0:
+        if len(cat_data) < 30:
             continue
         
-        # Metrics for discounted items
-        disc_avg_price = discounted['current_price'].mean()
-        disc_avg_orig_price = discounted['original_price'].mean()
-        disc_markdown_pct = (discounted['markdown_percentage'].mean())
-        disc_units = len(discounted)
-        disc_revenue = discounted['total_sales'].sum()
-        disc_avg_revenue_per_unit = disc_revenue / disc_units if disc_units > 0 else 0
+        # Current pricing and markdown analysis
+        avg_price = cat_data['current_price'].mean()
+        avg_original = cat_data['original_price'].mean()
+        current_markdown = cat_data['markdown_percentage'].mean()
         
-        # Metrics for non-discounted items
-        nodis_avg_price = not_discounted['current_price'].mean()
-        nodis_units = len(not_discounted)
-        nodis_revenue = not_discounted['total_sales'].sum()
-        nodis_avg_revenue_per_unit = nodis_revenue / nodis_units if nodis_units > 0 else 0
+        # Analyze markdown effectiveness
+        discount_brackets = [0, 10, 20, 30, 40, 100]
+        bracket_performance = []
         
-        # Calculate lift from discount
-        units_lift_pct = ((disc_units - nodis_units) / nodis_units * 100) if nodis_units > 0 else 0
-        price_loss_pct = ((disc_avg_price - nodis_avg_price) / nodis_avg_price * 100) if nodis_avg_price > 0 else 0
+        for i in range(len(discount_brackets) - 1):
+            lower, upper = discount_brackets[i], discount_brackets[i+1]
+            bracket_data = cat_data[(cat_data['markdown_percentage'] >= lower) & 
+                                    (cat_data['markdown_percentage'] < upper)]
+            if len(bracket_data) > 0:
+                bracket_performance.append({
+                    'bracket': f"{lower}-{upper}%",
+                    'avg_markdown': bracket_data['markdown_percentage'].mean(),
+                    'units_sold': len(bracket_data),
+                    'revenue': bracket_data['total_sales'].sum(),
+                    'avg_transaction': bracket_data['total_sales'].mean()
+                })
         
-        # Total profit impact
-        disc_profit_per_unit = disc_avg_price * 0.4  # Assume 40% margin
-        nodis_profit_per_unit = nodis_avg_price * 0.4
+        bracket_df = pd.DataFrame(bracket_performance)
         
-        total_disc_profit = disc_units * disc_profit_per_unit
-        total_nodis_profit = nodis_units * nodis_profit_per_unit
-        
-        # Optimal markdown calculation (maximize total profit)
-        # Current markdown effectiveness
-        markdown_efficiency = (units_lift_pct / 100) / (abs(price_loss_pct) / 100) if abs(price_loss_pct) > 0 else 0
-        
-        # Recommended markdown (if efficiency > 1, increase; if < 1, decrease)
-        if markdown_efficiency > 1.5:
-            recommended_markdown = disc_markdown_pct * 1.1
-        elif markdown_efficiency < 0.5:
-            recommended_markdown = disc_markdown_pct * 0.9
-        else:
-            recommended_markdown = disc_markdown_pct
-        
-        recommended_markdown = min(recommended_markdown, 0.5)  # Cap at 50%
-        
-        markdown_results.append({
-            'Category': category,
-            'Current_Markdown_%': disc_markdown_pct * 100,
-            'Recommended_Markdown_%': recommended_markdown * 100,
-            'Discounted_Units': disc_units,
-            'Non_Discounted_Units': nodis_units,
-            'Units_Lift_%': units_lift_pct,
-            'Price_Loss_%': price_loss_pct,
-            'Markdown_Efficiency': markdown_efficiency,
-            'Discounted_Avg_Price': disc_avg_price,
-            'Non_Discounted_Avg_Price': nodis_avg_price,
-            'Discounted_Total_Profit': total_disc_profit,
-            'Non_Discounted_Total_Profit': total_nodis_profit,
-            'Profit_Difference': total_disc_profit - total_nodis_profit
-        })
+        if len(bracket_df) > 0:
+            # Find optimal markdown level
+            bracket_df['revenue_per_markdown'] = bracket_df['revenue'] / (bracket_df['avg_markdown'] + 1)
+            optimal_bracket = bracket_df.loc[bracket_df['revenue_per_markdown'].idxmax()]
+            
+            # Markdown schedule recommendation (3-period clearance)
+            initial_markdown = max(5, current_markdown * 0.5)
+            mid_markdown = optimal_bracket['avg_markdown']
+            final_markdown = min(50, mid_markdown * 1.5)
+            
+            markdown_results.append({
+                'category': category,
+                'current_avg_markdown': current_markdown,
+                'current_avg_price': avg_price,
+                'original_price': avg_original,
+                'optimal_markdown': optimal_bracket['avg_markdown'],
+                'period_1_markdown': initial_markdown,
+                'period_2_markdown': mid_markdown,
+                'period_3_markdown': final_markdown,
+                'expected_clearance_rate': min(95, 70 + final_markdown),
+                'num_products': cat_data['product_id'].nunique()
+            })
     
     markdown_df = pd.DataFrame(markdown_results)
     
-    print("\nMarkdown Optimization Results:")
-    print(markdown_df[[col for col in markdown_df.columns if col not in ['Discounted_Avg_Price', 'Non_Discounted_Avg_Price', 'Discounted_Total_Profit', 'Non_Discounted_Total_Profit']]].to_string(index=False))
+    print("\n[MARKDOWN OPTIMIZATION PRESCRIPTIONS]:")
+    print("-" * 100)
+    
+    for _, row in markdown_df.iterrows():
+        print(f"\nCategory: {row['category']}")
+        print(f"  Current Avg Markdown: {row['current_avg_markdown']:.1f}%")
+        print(f"  Optimal Markdown Level: {row['optimal_markdown']:.1f}%")
+        print(f"  PRESCRIPTION - Markdown Schedule:")
+        print(f"    Period 1 (Week 1-2): {row['period_1_markdown']:.0f}% off")
+        print(f"    Period 2 (Week 3-4): {row['period_2_markdown']:.0f}% off")
+        print(f"    Period 3 (Week 5+):  {row['period_3_markdown']:.0f}% off")
+        print(f"  Expected Clearance Rate: {row['expected_clearance_rate']:.0f}%")
     
     # Visualization
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Plot 1: Current vs recommended markdown
+    # Plot 1: Current vs Optimal Markdown
     x_pos = np.arange(len(markdown_df))
     width = 0.35
-    axes[0, 0].bar(x_pos - width/2, markdown_df['Current_Markdown_%'], width, label='Current', color='#3498db')
-    axes[0, 0].bar(x_pos + width/2, markdown_df['Recommended_Markdown_%'], width, label='Recommended', color='#2ecc71')
-    axes[0, 0].set_ylabel('Markdown Level (%)', fontweight='bold')
-    axes[0, 0].set_title('Current vs Optimal Markdown Strategy', fontweight='bold', fontsize=12)
+    axes[0, 0].bar(x_pos - width/2, markdown_df['current_avg_markdown'], width, 
+                   label='Current', color='#3498db')
+    axes[0, 0].bar(x_pos + width/2, markdown_df['optimal_markdown'], width, 
+                   label='Optimal', color='#2ecc71')
+    axes[0, 0].set_ylabel('Markdown (%)')
+    axes[0, 0].set_title('MODEL: Current vs Optimal Markdown', fontweight='bold')
     axes[0, 0].set_xticks(x_pos)
-    axes[0, 0].set_xticklabels(markdown_df['Category'], rotation=45, ha='right')
+    axes[0, 0].set_xticklabels(markdown_df['category'], rotation=45, ha='right')
     axes[0, 0].legend()
     axes[0, 0].grid(axis='y', alpha=0.3)
     
-    # Plot 2: Units impact
-    x_pos = np.arange(len(markdown_df))
-    width = 0.35
-    axes[0, 1].bar(x_pos - width/2, markdown_df['Discounted_Units'], width, label='With Markdown', color='#2ecc71')
-    axes[0, 1].bar(x_pos + width/2, markdown_df['Non_Discounted_Units'], width, label='Without Markdown', color='#e74c3c')
-    axes[0, 1].set_ylabel('Units Sold', fontweight='bold')
-    axes[0, 1].set_title('Units Impact: With vs Without Markdown', fontweight='bold', fontsize=12)
-    axes[0, 1].set_xticks(x_pos)
-    axes[0, 1].set_xticklabels(markdown_df['Category'], rotation=45, ha='right')
-    axes[0, 1].legend()
-    axes[0, 1].grid(axis='y', alpha=0.3)
+    # Plot 2: Markdown Schedule
+    schedule_data = markdown_df[['category', 'period_1_markdown', 'period_2_markdown', 'period_3_markdown']].melt(
+        id_vars='category', var_name='period', value_name='markdown'
+    )
+    period_labels = {'period_1_markdown': 'Period 1', 'period_2_markdown': 'Period 2', 'period_3_markdown': 'Period 3'}
+    schedule_data['period'] = schedule_data['period'].map(period_labels)
     
-    # Plot 3: Units lift percentage
-    colors = ['#2ecc71' if x > 0 else '#e74c3c' for x in markdown_df['Units_Lift_%']]
-    axes[0, 2].bar(range(len(markdown_df)), markdown_df['Units_Lift_%'].values, color=colors)
-    axes[0, 2].axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-    axes[0, 2].set_ylabel('Units Lift (%)', fontweight='bold')
-    axes[0, 2].set_title('Volume Increase from Markdown', fontweight='bold', fontsize=12)
-    axes[0, 2].set_xticks(range(len(markdown_df)))
-    axes[0, 2].set_xticklabels(markdown_df['Category'], rotation=45, ha='right')
-    axes[0, 2].grid(axis='y', alpha=0.3)
+    for i, cat in enumerate(markdown_df['category'].unique()[:5]):  # Show top 5
+        cat_schedule = schedule_data[schedule_data['category'] == cat]
+        axes[0, 1].plot(['Period 1', 'Period 2', 'Period 3'], 
+                        cat_schedule.sort_values('period')['markdown'].values,
+                        marker='o', linewidth=2, label=cat[:10])
+    axes[0, 1].set_xlabel('Clearance Period')
+    axes[0, 1].set_ylabel('Markdown (%)')
+    axes[0, 1].set_title('MODEL: Markdown Schedule by Category', fontweight='bold')
+    axes[0, 1].legend(loc='upper left', fontsize=8)
+    axes[0, 1].grid(True, alpha=0.3)
     
-    # Plot 4: Price loss percentage
-    axes[1, 0].barh(range(len(markdown_df)), markdown_df['Price_Loss_%'].values, color='#e74c3c')
-    axes[1, 0].set_xticks(range(len(markdown_df)))
-    axes[1, 0].set_yticklabels(markdown_df['Category'])
-    axes[1, 0].set_xlabel('Price Loss (%)', fontweight='bold')
-    axes[1, 0].set_title('Revenue Impact per Unit', fontweight='bold', fontsize=12)
+    # Plot 3: Expected Clearance Rate
+    clearance_sorted = markdown_df.sort_values('expected_clearance_rate')
+    axes[1, 0].barh(range(len(clearance_sorted)), clearance_sorted['expected_clearance_rate'].values, 
+                    color='#9b59b6')
+    axes[1, 0].set_yticks(range(len(clearance_sorted)))
+    axes[1, 0].set_yticklabels(clearance_sorted['category'])
+    axes[1, 0].set_xlabel('Expected Clearance Rate (%)')
+    axes[1, 0].set_title('MODEL: Expected Clearance by Category', fontweight='bold')
+    axes[1, 0].axvline(x=80, color='green', linestyle='--', label='Target: 80%')
+    axes[1, 0].legend()
     axes[1, 0].grid(axis='x', alpha=0.3)
     
-    # Plot 5: Markdown efficiency (units lift / price loss)
-    colors = ['#2ecc71' if x > 1 else '#f39c12' if x > 0.5 else '#e74c3c' for x in markdown_df['Markdown_Efficiency']]
-    axes[1, 1].barh(range(len(markdown_df)), markdown_df['Markdown_Efficiency'].values, color=colors)
-    axes[1, 1].axvline(x=1, color='red', linestyle='--', linewidth=2, label='Break-even')
-    axes[1, 1].set_xticks(range(len(markdown_df)))
-    axes[1, 1].set_yticklabels(markdown_df['Category'])
-    axes[1, 1].set_xlabel('Markdown Efficiency', fontweight='bold')
-    axes[1, 1].set_title('Volume Lift vs Price Loss Ratio', fontweight='bold', fontsize=12)
-    axes[1, 1].legend()
-    axes[1, 1].grid(axis='x', alpha=0.3)
+    # Plot 4: Price Decay Curve
+    periods = np.array([0, 1, 2, 3, 4, 5, 6])
+    sample_cat = markdown_df.iloc[0]
+    prices = [100]  # Start at 100%
+    for p in [sample_cat['period_1_markdown'], sample_cat['period_1_markdown'],
+              sample_cat['period_2_markdown'], sample_cat['period_2_markdown'],
+              sample_cat['period_3_markdown'], sample_cat['period_3_markdown']]:
+        prices.append(100 - p)
     
-    # Plot 6: Profit comparison
-    x_pos = np.arange(len(markdown_df))
-    width = 0.35
-    axes[1, 2].bar(x_pos - width/2, markdown_df['Discounted_Total_Profit'], width, label='With Markdown', color='#2ecc71')
-    axes[1, 2].bar(x_pos + width/2, markdown_df['Non_Discounted_Total_Profit'], width, label='Without Markdown', color='#e74c3c')
-    axes[1, 2].set_ylabel('Total Profit ($)', fontweight='bold')
-    axes[1, 2].set_title('Total Profit: With vs Without Markdown', fontweight='bold', fontsize=12)
-    axes[1, 2].set_xticks(x_pos)
-    axes[1, 2].set_xticklabels(markdown_df['Category'], rotation=45, ha='right')
-    axes[1, 2].legend()
-    axes[1, 2].grid(axis='y', alpha=0.3)
+    axes[1, 1].step(periods, prices, where='post', linewidth=3, color='#e74c3c')
+    axes[1, 1].fill_between(periods, prices, 0, step='post', alpha=0.3, color='#e74c3c')
+    axes[1, 1].set_xlabel('Week')
+    axes[1, 1].set_ylabel('Price (% of Original)')
+    axes[1, 1].set_title(f"MODEL: Markdown Decay Curve ({sample_cat['category']})", fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].set_ylim(0, 110)
     
     plt.tight_layout()
-    plt.savefig('markdown_optimization_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig('Prescriptive_Analytics/model_markdown.png', dpi=300, bbox_inches='tight')
     plt.show()
-    print("✓ Markdown optimization visualization saved as 'markdown_optimization_analysis.png'")
     
     return markdown_df
 
-# ============================================================================
-# 7. EXPORT RESULTS TO CSV FOR BI VISUALIZATION
-# ============================================================================
-def export_results_to_csv(eoq_results, newsvendor_results, mip_results, 
-                          stochastic_results, pricing_results, markdown_results, df):
-    """
-    Export all prescriptive analytics model results to CSV files
-    for Business Intelligence tool visualization (Power BI, Tableau, etc.)
-    """
-    print("\n" + "=" * 80)
-    print("7. EXPORTING RESULTS TO CSV FOR BI VISUALIZATION")
-    print("=" * 80)
-    
-    import os
-    
-    # Create output directory for CSV files
-    output_dir = "Prescriptive_Analytics/BI_Export"
-    os.makedirs(output_dir, exist_ok=True)
-    
-    exported_files = []
-    
-    # -------------------------------------------------------------------------
-    # 1. EOQ Model Export
-    # -------------------------------------------------------------------------
-    eoq_export = eoq_results.reset_index()
-    eoq_export.columns = ['product_id', 'units_sold', 'total_revenue', 'avg_price', 
-                          'annual_demand', 'holding_cost', 'eoq', 'annual_orders',
-                          'annual_order_cost', 'annual_holding_cost', 'total_inventory_cost']
-    eoq_export['model'] = 'EOQ'
-    eoq_export['order_cost_assumed'] = 50
-    eoq_export['holding_cost_rate'] = 0.25
-    eoq_file = f"{output_dir}/eoq_model_results.csv"
-    eoq_export.to_csv(eoq_file, index=False)
-    exported_files.append(eoq_file)
-    print(f"✓ EOQ Model: {eoq_file}")
-    
-    # -------------------------------------------------------------------------
-    # 2. Newsvendor Model Export
-    # -------------------------------------------------------------------------
-    newsvendor_export = newsvendor_results.reset_index()
-    newsvendor_export.columns = ['category', 'units_sold', 'total_revenue', 'avg_revenue',
-                                  'revenue_std', 'avg_price', 'cost', 'margin',
-                                  'mean_daily_demand', 'std_daily_demand', 'min_daily_demand', 'max_daily_demand',
-                                  'mean_monthly_demand', 'std_monthly_demand', 'min_monthly_demand', 'max_monthly_demand',
-                                  'expected_shortage']
-    newsvendor_export['model'] = 'Newsvendor'
-    newsvendor_export['daily_demand_range'] = newsvendor_export['max_daily_demand'] - newsvendor_export['min_daily_demand']
-    newsvendor_export['monthly_demand_range'] = newsvendor_export['max_monthly_demand'] - newsvendor_export['min_monthly_demand']
-    newsvendor_export['demand_coefficient_of_variation'] = newsvendor_export['std_daily_demand'] / newsvendor_export['mean_daily_demand']
-    newsvendor_file = f"{output_dir}/newsvendor_model_results.csv"
-    newsvendor_export.to_csv(newsvendor_file, index=False)
-    exported_files.append(newsvendor_file)
-    print(f"✓ Newsvendor Model: {newsvendor_file}")
-    
-    # -------------------------------------------------------------------------
-    # 3. MIP Model Export
-    # -------------------------------------------------------------------------
-    mip_export = mip_results.copy()
-    mip_export.columns = ['warehouse_location', 'demand', 'allocation', 'capacity_utilization_pct',
-                          'revenue', 'cost', 'profit']
-    mip_export['model'] = 'MIP'
-    mip_export['warehouse_capacity'] = 500
-    mip_export['transportation_cost_per_unit'] = 5
-    mip_export['warehouse_cost_per_unit'] = 2
-    mip_export['unmet_demand'] = mip_export['demand'] - mip_export['allocation']
-    mip_export['profit_margin_pct'] = (mip_export['profit'] / mip_export['revenue'] * 100).round(2)
-    mip_file = f"{output_dir}/mip_model_results.csv"
-    mip_export.to_csv(mip_file, index=False)
-    exported_files.append(mip_file)
-    print(f"✓ MIP Model: {mip_file}")
-    
-    # -------------------------------------------------------------------------
-    # 4. Stochastic Optimization Export
-    # -------------------------------------------------------------------------
-    stochastic_export = stochastic_results.copy()
 
-    # Drop the extra CV column before renaming (it will be recomputed below)
-    if 'CV' in stochastic_export.columns:
-        stochastic_export = stochastic_export.drop(columns=['CV'])
+# =============================================================================
+# SUMMARY: LIST ALL PRESCRIPTIVE MODELS
+# =============================================================================
 
-    stochastic_export.columns = [
-        'category', 'mean_demand', 'std_dev', 'min_demand', 'max_demand',
-        'optimal_stock', 'safety_stock', 'expected_shortage',
-        'stockout_risk_pct', 'expected_shortage_cost'
-    ]
-
-    stochastic_export['model'] = 'Stochastic'
-    stochastic_export['service_level_target'] = 95
-    stochastic_export['z_score_used'] = 1.645
-    stochastic_export['shortage_cost_per_unit'] = 50
-    stochastic_export['coefficient_of_variation'] = (
-        stochastic_export['std_dev'] / stochastic_export['mean_demand']
-    )
-    stochastic_export['demand_range'] = (
-        stochastic_export['max_demand'] - stochastic_export['min_demand']
-    )
-
-    stochastic_file = f"{output_dir}/stochastic_model_results.csv"
-    stochastic_export.to_csv(stochastic_file, index=False)
-    exported_files.append(stochastic_file)
-    print(f"✓ Stochastic Optimization: {stochastic_file}")
-
+def list_prescriptive_models():
+    """Print comprehensive list of all prescriptive models used"""
+    print("\n" + "=" * 100)
+    print(" " * 25 + "PRESCRIPTIVE ANALYTICS - MODELS SUMMARY")
+    print("=" * 100)
     
-    # -------------------------------------------------------------------------
-    # 5. Dynamic Pricing Export
-    # -------------------------------------------------------------------------
-    pricing_export = pricing_results.copy()
-    pricing_export.columns = ['category', 'current_price', 'optimal_price', 'price_change_pct',
-                               'price_elasticity', 'current_quantity', 'expected_quantity',
-                               'current_revenue', 'expected_revenue', 'revenue_change_amount',
-                               'revenue_change_pct']
-    pricing_export['model'] = 'Dynamic_Pricing'
-    pricing_export['elasticity_type'] = pricing_export['price_elasticity'].apply(
-        lambda x: 'Elastic' if x < -1 else ('Inelastic' if x > -1 and x < 0 else 'Unit Elastic')
-    )
-    pricing_export['price_action'] = pricing_export['price_change_pct'].apply(
-        lambda x: 'Increase' if x > 0 else ('Decrease' if x < 0 else 'Maintain')
-    )
-    pricing_export['quantity_change_pct'] = ((pricing_export['expected_quantity'] - pricing_export['current_quantity']) / 
-                                              pricing_export['current_quantity'] * 100).round(2)
-    pricing_file = f"{output_dir}/dynamic_pricing_model_results.csv"
-    pricing_export.to_csv(pricing_file, index=False)
-    exported_files.append(pricing_file)
-    print(f"✓ Dynamic Pricing: {pricing_file}")
+    all_models = []
     
-    # -------------------------------------------------------------------------
-    # 6. Markdown Optimization Export
-    # -------------------------------------------------------------------------
-    markdown_export = markdown_results.copy()
-    markdown_export.columns = ['category', 'current_markdown_pct', 'recommended_markdown_pct',
-                                'discounted_units', 'non_discounted_units', 'units_lift_pct',
-                                'price_loss_pct', 'markdown_efficiency', 'discounted_avg_price',
-                                'non_discounted_avg_price', 'discounted_total_profit',
-                                'non_discounted_total_profit', 'profit_difference']
-    markdown_export['model'] = 'Markdown_Optimization'
-    markdown_export['markdown_action'] = markdown_export.apply(
-        lambda x: 'Increase' if x['recommended_markdown_pct'] > x['current_markdown_pct'] 
-        else ('Decrease' if x['recommended_markdown_pct'] < x['current_markdown_pct'] else 'Maintain'), axis=1
-    )
-    markdown_export['is_markdown_efficient'] = markdown_export['markdown_efficiency'] > 1
-    markdown_export['avg_price_discount'] = ((markdown_export['non_discounted_avg_price'] - markdown_export['discounted_avg_price']) / 
-                                              markdown_export['non_discounted_avg_price'] * 100).round(2)
-    markdown_file = f"{output_dir}/markdown_optimization_results.csv"
-    markdown_export.to_csv(markdown_file, index=False)
-    exported_files.append(markdown_file)
-    print(f"✓ Markdown Optimization: {markdown_file}")
+    for category, models in PRESCRIPTIVE_MODELS.items():
+        if models:
+            print(f"\n{'-' * 100}")
+            print(f"{category.upper()}:")
+            print("-" * 100)
+            for model in models:
+                print(f"  * {model['name']}")
+                print(f"    Description: {model['description']}")
+                all_models.append(model['name'])
     
-    # -------------------------------------------------------------------------
-    # 7. Combined Summary Export (for executive dashboards)
-    # -------------------------------------------------------------------------
-    summary_data = []
+    print(f"\n{'=' * 100}")
+    print(f"TOTAL PRESCRIPTIVE MODELS: {len(all_models)}")
+    print("=" * 100)
     
-    # EOQ Summary
-    summary_data.append({
-        'model': 'EOQ',
-        'metric': 'Average EOQ',
-        'value': eoq_results['eoq'].mean(),
-        'unit': 'units'
-    })
-    summary_data.append({
-        'model': 'EOQ',
-        'metric': 'Total Annual Inventory Cost',
-        'value': eoq_results['total_inventory_cost'].sum(),
-        'unit': 'USD'
-    })
-    summary_data.append({
-        'model': 'EOQ',
-        'metric': 'Average Annual Orders',
-        'value': eoq_results['annual_orders'].mean(),
-        'unit': 'orders'
-    })
+    # Models list
+    print("\n[MODELS LIST]")
+    print("1. Economic Order Quantity (EOQ) - Classical inventory optimization")
+    print("2. Newsvendor Model - Single-period stochastic inventory")
+    print("3. Mixed-Integer Programming (MIP) - Binary assortment optimization")
+    print("4. Stochastic Optimization - Multi-scenario uncertainty optimization")
+    print("5. Dynamic Pricing Optimization - Price elasticity-based pricing")
+    print("6. Markdown Optimization - End-of-season clearance pricing")
     
-    # Newsvendor Summary
-    summary_data.append({
-        'model': 'Newsvendor',
-        'metric': 'Average Daily Demand',
-        'value': newsvendor_results['mean_daily_demand'].mean(),
-        'unit': 'units'
-    })
-    summary_data.append({
-        'model': 'Newsvendor',
-        'metric': 'Average Demand Variability',
-        'value': newsvendor_results['std_daily_demand'].mean(),
-        'unit': 'units'
-    })
-    
-    # MIP Summary
-    summary_data.append({
-        'model': 'MIP',
-        'metric': 'Total Optimized Profit',
-        'value': mip_results['Profit'].sum(),
-        'unit': 'USD'
-    })
-    summary_data.append({
-        'model': 'MIP',
-        'metric': 'Average Capacity Utilization',
-        'value': mip_results['Capacity_Used_%'].mean(),
-        'unit': 'percent'
-    })
-    
-    # Stochastic Summary
-    summary_data.append({
-        'model': 'Stochastic',
-        'metric': 'Average Stockout Risk',
-        'value': stochastic_results['Stockout_Risk_%'].mean(),
-        'unit': 'percent'
-    })
-    summary_data.append({
-        'model': 'Stochastic',
-        'metric': 'Total Expected Shortage Cost',
-        'value': stochastic_results['Expected_Shortage_Cost'].sum(),
-        'unit': 'USD'
-    })
-    summary_data.append({
-        'model': 'Stochastic',
-        'metric': 'Average Safety Stock',
-        'value': stochastic_results['Safety_Stock'].mean(),
-        'unit': 'units'
-    })
-    
-    # Dynamic Pricing Summary
-    summary_data.append({
-        'model': 'Dynamic_Pricing',
-        'metric': 'Average Revenue Uplift Potential',
-        'value': pricing_results['Revenue_Change_%'].mean(),
-        'unit': 'percent'
-    })
-    summary_data.append({
-        'model': 'Dynamic_Pricing',
-        'metric': 'Total Revenue Opportunity',
-        'value': pricing_results['Revenue_Change_$'].sum(),
-        'unit': 'USD'
-    })
-    
-    # Markdown Summary
-    summary_data.append({
-        'model': 'Markdown_Optimization',
-        'metric': 'Average Markdown Efficiency',
-        'value': markdown_results['Markdown_Efficiency'].mean(),
-        'unit': 'ratio'
-    })
-    summary_data.append({
-        'model': 'Markdown_Optimization',
-        'metric': 'Categories with Efficient Markdowns',
-        'value': (markdown_results['Markdown_Efficiency'] > 1).sum(),
-        'unit': 'count'
-    })
-    
-    summary_df = pd.DataFrame(summary_data)
-    summary_file = f"{output_dir}/executive_summary.csv"
-    summary_df.to_csv(summary_file, index=False)
-    exported_files.append(summary_file)
-    print(f"✓ Executive Summary: {summary_file}")
-    
-    # -------------------------------------------------------------------------
-    # 8. Time Series Data Export (for trend analysis in BI)
-    # -------------------------------------------------------------------------
-    df['date'] = df['purchase_date'].dt.date
-    daily_metrics = df.groupby('date').agg({
-        'product_id': 'count',
-        'total_sales': 'sum',
-        'current_price': 'mean',
-        'markdown_percentage': 'mean'
-    }).reset_index()
-    daily_metrics.columns = ['date', 'daily_units_sold', 'daily_revenue', 'avg_price', 'avg_markdown_pct']
-    daily_metrics['date'] = pd.to_datetime(daily_metrics['date'])
-    daily_metrics['day_of_week'] = daily_metrics['date'].dt.day_name()
-    daily_metrics['month'] = daily_metrics['date'].dt.month_name()
-    daily_metrics['week_number'] = daily_metrics['date'].dt.isocalendar().week
-    daily_metrics['is_weekend'] = daily_metrics['date'].dt.dayofweek >= 5
-    
-    timeseries_file = f"{output_dir}/daily_timeseries_data.csv"
-    daily_metrics.to_csv(timeseries_file, index=False)
-    exported_files.append(timeseries_file)
-    print(f"✓ Time Series Data: {timeseries_file}")
-    
-    # -------------------------------------------------------------------------
-    # 9. Category Performance Export
-    # -------------------------------------------------------------------------
-    category_perf = df.groupby('category').agg({
-        'product_id': 'count',
-        'total_sales': ['sum', 'mean'],
-        'current_price': 'mean',
-        'original_price': 'mean',
-        'markdown_percentage': 'mean'
-    }).reset_index()
-    category_perf.columns = ['category', 'total_units', 'total_revenue', 'avg_revenue_per_unit',
-                             'avg_current_price', 'avg_original_price', 'avg_markdown_pct']
-    category_perf['avg_discount_amount'] = category_perf['avg_original_price'] - category_perf['avg_current_price']
-    category_perf['revenue_share_pct'] = (category_perf['total_revenue'] / category_perf['total_revenue'].sum() * 100).round(2)
-    
-    category_file = f"{output_dir}/category_performance.csv"
-    category_perf.to_csv(category_file, index=False)
-    exported_files.append(category_file)
-    print(f"✓ Category Performance: {category_file}")
-    
-    # -------------------------------------------------------------------------
-    # 10. Geographic Performance Export
-    # -------------------------------------------------------------------------
-    geo_perf = df.groupby('country').agg({
-        'product_id': 'count',
-        'total_sales': ['sum', 'mean'],
-        'current_price': 'mean'
-    }).reset_index()
-    geo_perf.columns = ['country', 'total_units', 'total_revenue', 'avg_revenue_per_unit', 'avg_price']
-    geo_perf['revenue_share_pct'] = (geo_perf['total_revenue'] / geo_perf['total_revenue'].sum() * 100).round(2)
-    geo_perf['units_share_pct'] = (geo_perf['total_units'] / geo_perf['total_units'].sum() * 100).round(2)
-    
-    geo_file = f"{output_dir}/geographic_performance.csv"
-    geo_perf.to_csv(geo_file, index=False)
-    exported_files.append(geo_file)
-    print(f"✓ Geographic Performance: {geo_file}")
-    
-    # Final summary
-    print("\n" + "-" * 60)
-    print(f"Total CSV files exported: {len(exported_files)}")
-    print(f"Export location: {output_dir}/")
-    print("-" * 60)
-    print("\nFiles ready for BI tool import:")
-    for f in exported_files:
-        print(f"  - {f}")
-    print("\nRecommended BI visualizations:")
-    print("  1. EOQ: Bar charts for order quantities, cost breakdowns")
-    print("  2. Newsvendor: Scatter plots for demand variability")
-    print("  3. MIP: Treemaps for allocation, gauge charts for utilization")
-    print("  4. Stochastic: Risk heatmaps, safety stock gauges")
-    print("  5. Dynamic Pricing: Waterfall charts for revenue impact")
-    print("  6. Markdown: Efficiency quadrant charts, profit comparisons")
-    print("  7. Executive Summary: KPI cards, summary tables")
-    print("  8. Time Series: Line charts with trend analysis")
-    print("  9. Category/Geo: Pie charts, bar charts for performance")
-    
-    return exported_files
+    return PRESCRIPTIVE_MODELS
 
 
-# ============================================================================
+# =============================================================================
 # MAIN EXECUTION
-# ============================================================================
+# =============================================================================
+
 if __name__ == "__main__":
-    # Load data using the new load_data function
+    print("\n" + "=" * 100)
+    print(" " * 30 + "PRESCRIPTIVE ANALYTICS PIPELINE")
+    print(" " * 25 + "Optimization Models for Business Decisions")
+    print("=" * 100)
+    
+    # Load data
     df = load_data()
     
-    if df is not None:
-        # Run all models
-        eoq_results = calculate_eoq(df)
-        newsvendor_results = newsvendor_model(df)
-        mip_results = mixed_integer_programming(df)
-        stochastic_results = stochastic_optimization(df)
-        pricing_results = dynamic_pricing_optimization(df)
-        markdown_results = markdown_optimization(df)
-        
-        exported_files = export_results_to_csv(
-            eoq_results, newsvendor_results, mip_results,
-            stochastic_results, pricing_results, markdown_results, df
-        )
-        
-        # Summary report
-        print("\n" + "=" * 80)
-        print("OPTIMIZATION SUMMARY")
-        print("=" * 80)
-        
-        print("\n1. EOQ Model:")
-        print(f"   - Average optimal order quantity: {eoq_results['eoq'].mean():.0f} units")
-        print(f"   - Average annual inventory cost: ${eoq_results['total_inventory_cost'].mean():,.2f}")
-        
-        print("\n2. Newsvendor Model:")
-        print(f"   - Average expected shortage: {newsvendor_results['Expected_Shortage'].mean():.1f} units")
-        
-        print("\n3. MIP Model:")
-        total_profit_mip = mip_results['Profit'].sum()
-        print(f"   - Total optimal profit: ${total_profit_mip:,.2f}")
-        print(f"   - Average warehouse utilization: {mip_results['Capacity_Used_%'].mean():.1f}%")
-        
-        print("\n4. Stochastic Optimization:")
-        print(f"   - Average stockout risk: {stochastic_results['Stockout_Risk_%'].mean():.1f}%")
-        print(f"   - Average expected shortage cost: ${stochastic_results['Expected_Shortage_Cost'].mean():,.2f}")
-        
-        print("\n5. Dynamic Pricing:")
-        avg_revenue_change = pricing_results['Revenue_Change_%'].mean()
-        print(f"   - Average revenue optimization potential: {avg_revenue_change:+.1f}%")
-        print(f"   - Categories with price increase potential: {(pricing_results['Price_Change_%'] > 0).sum()}")
-        
-        print("\n6. Markdown Optimization:")
-        efficient_markdowns = (markdown_results['Markdown_Efficiency'] > 1).sum()
-        print(f"   - Categories with efficient markdowns: {efficient_markdowns}")
-        print(f"   - Average markdown efficiency: {markdown_results['Markdown_Efficiency'].mean():.2f}")
-        
-        print("\n" + "=" * 80)
-        print("Analysis complete! Check the generated PNG files for visualizations and CSV files for BI import.")
-        print("=" * 80)
-        
-    else:
-        print("✗ Failed to load data. Please check the CSV file path.")
+    # Compute demand statistics
+    product_demand, category_demand = compute_demand_statistics(df)
+    
+    # Run all prescriptive models
+    print("\n" + "=" * 100)
+    print("RUNNING PRESCRIPTIVE OPTIMIZATION MODELS")
+    print("=" * 100)
+    
+    # Model 1: EOQ
+    eoq_results = model_eoq(df, product_demand)
+    
+    # Model 2: Newsvendor
+    newsvendor_results = model_newsvendor(df, product_demand)
+    
+    # Model 3: MIP Assortment
+    mip_results = model_mip_assortment(df, product_demand, category_demand)
+    
+    # Model 4: Stochastic Optimization
+    stochastic_results = model_stochastic_optimization(df, product_demand)
+    
+    # Model 5: Dynamic Pricing
+    pricing_results = model_dynamic_pricing(df, product_demand)
+    
+    # Model 6: Markdown Optimization
+    markdown_results = model_markdown_optimization(df, product_demand)
+    
+    # Summary
+    models_summary = list_prescriptive_models()
+    
+    # Export results
+    print("\n" + "=" * 100)
+    print("EXPORTING RESULTS")
+    print("=" * 100)
+    
+    output_dir = "Prescriptive_Analytics/Model_Results"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    eoq_results.to_csv(f"{output_dir}/model_1_eoq_results.csv", index=False)
+    newsvendor_results.to_csv(f"{output_dir}/model_2_newsvendor_results.csv", index=False)
+    mip_results.to_csv(f"{output_dir}/model_3_mip_results.csv", index=False)
+    stochastic_results.to_csv(f"{output_dir}/model_4_stochastic_results.csv", index=False)
+    pricing_results.to_csv(f"{output_dir}/model_5_dynamic_pricing_results.csv", index=False)
+    markdown_results.to_csv(f"{output_dir}/model_6_markdown_results.csv", index=False)
+    
+    print(f"\n[OK] All model results exported to {output_dir}/")
+    
+    print("\n" + "=" * 100)
+    print(" " * 30 + "PRESCRIPTIVE ANALYTICS COMPLETE")
+    print("=" * 100)

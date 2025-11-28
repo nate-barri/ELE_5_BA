@@ -587,35 +587,38 @@ print(f"\nTop Category: {category_forecast.iloc[0]['category']} "
       f"(${category_forecast.iloc[0]['total_forecast_demand']:,.2f})")
 
 # =============================================================================
-# PART 4: ENHANCED VISUALIZATIONS
+# PART 4: VISUALIZATIONS (DISPLAY ONLY) + CSV EXPORTS FOR POWER BI
 # =============================================================================
 print("\n" + "=" * 100)
-print("PART 4: GENERATING ENHANCED VISUALIZATIONS")
+print("PART 4: DISPLAYING VISUALIZATIONS AND GENERATING CSV FILES FOR POWER BI")
 print("=" * 100)
 
-# Set style
+# Set style for matplotlib
 plt.style.use('seaborn-v0_8-darkgrid')
 colors = plt.cm.Set3(np.linspace(0, 1, 10))
 
+# =============================================================================
+# DISPLAY VISUALIZATIONS (NO PNG SAVING)
+# =============================================================================
+print("\nDisplaying visualizations...")
+
+# 1) Model Performance Comparison
 fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
 fig1.suptitle('Model Performance Comparison - SKU Level', fontsize=16, fontweight='bold')
 
 metrics_data = [metrics_xgb_sku, metrics_rf_sku, metrics_lin_sku, metrics_ensemble_sku]
 model_names = ['XGBoost\n(Enhanced)', 'Random\nForest', 'Linear\nRegression', 'Ensemble']
 
-# MAE
 axes1[0, 0].bar(model_names, [m['mae'] for m in metrics_data], color=colors[:4])
 axes1[0, 0].set_title('Mean Absolute Error (MAE)', fontweight='bold')
 axes1[0, 0].set_ylabel('MAE')
 axes1[0, 0].grid(axis='y', alpha=0.3)
 
-# RMSE
 axes1[0, 1].bar(model_names, [m['rmse'] for m in metrics_data], color=colors[:4])
 axes1[0, 1].set_title('Root Mean Squared Error (RMSE)', fontweight='bold')
 axes1[0, 1].set_ylabel('RMSE')
 axes1[0, 1].grid(axis='y', alpha=0.3)
 
-# MASE
 axes1[0, 2].bar(model_names, [m['mase'] for m in metrics_data], color=colors[:4])
 axes1[0, 2].set_title('Mean Absolute Scaled Error (MASE)', fontweight='bold')
 axes1[0, 2].set_ylabel('MASE')
@@ -623,31 +626,27 @@ axes1[0, 2].axhline(y=1, color='r', linestyle='--', label='Naive Forecast')
 axes1[0, 2].legend()
 axes1[0, 2].grid(axis='y', alpha=0.3)
 
-# MAPE (NEW)
-axes1[1, 1].bar(model_names, [m['mape'] for m in metrics_data], color=colors[:4])
-axes1[1, 1].set_title('Mean Absolute Percentage Error (MAPE)', fontweight='bold')
-axes1[1, 1].set_ylabel('MAPE (%)')
-axes1[1, 1].grid(axis='y', alpha=0.3)
+axes1[1, 0].bar(model_names, [m['mape'] for m in metrics_data], color=colors[:4])
+axes1[1, 0].set_title('Mean Absolute Percentage Error (MAPE)', fontweight='bold')
+axes1[1, 0].set_ylabel('MAPE (%)')
+axes1[1, 0].grid(axis='y', alpha=0.3)
 
-# Hide the last subplot
+axes1[1, 1].axis('off')
 axes1[1, 2].axis('off')
 
 plt.tight_layout()
-out1 = os.path.join(base_dir, "enhanced_viz1_model_comparison.png")
-plt.savefig(out1, dpi=300, bbox_inches='tight')
 plt.show()
-print(f"✓ Saved: {out1}")
-# 2) ABC Analysis Visualization
+print("✓ Displayed: Model Comparison")
+
+# 2) ABC Analysis
 fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
 fig2.suptitle('ABC Analysis - Product Classification', fontsize=16, fontweight='bold')
 
-# Products by ABC
 abc_counts = abc_summary.set_index('abc_category')['product_id']
 axes2[0].pie(abc_counts, labels=abc_counts.index, autopct='%1.1f%%', 
              colors=['#ff9999', '#66b3ff', '#99ff99'], startangle=90)
 axes2[0].set_title('Product Distribution by ABC Category', fontweight='bold')
 
-# Sales by ABC
 abc_sales = abc_summary.set_index('abc_category')['total_sales']
 axes2[1].bar(abc_sales.index, abc_sales.values, color=['#ff9999', '#66b3ff', '#99ff99'])
 axes2[1].set_title('Sales Distribution by ABC Category', fontweight='bold')
@@ -656,12 +655,10 @@ axes2[1].yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
 axes2[1].grid(axis='y', alpha=0.3)
 
 plt.tight_layout()
-out2 = os.path.join(base_dir, "enhanced_viz2_abc_analysis.png")
-plt.savefig(out2, dpi=300, bbox_inches='tight')
 plt.show()
-print(f"✓ Saved: {out2}")
+print("✓ Displayed: ABC Analysis")
 
-# 3) Top 10 Historical vs Forecasted Products
+# 3) Top 10 Historical vs Forecasted
 fig3, ax3 = plt.subplots(figsize=(12, 8))
 
 top_hist_ids = top_hist_products['product_id'].values
@@ -671,11 +668,11 @@ top_hist_matched = top_hist_products.set_index('product_id')
 x = np.arange(len(top_hist_ids))
 width = 0.35
 
-bars1 = ax3.bar(x - width/2, [top_hist_matched.loc[pid, 'total_hist_demand'] for pid in top_hist_ids],
-                width, label='Historical', color='steelblue', alpha=0.8)
-bars2 = ax3.bar(x + width/2, [top_forecast_matched.loc[pid, 'total_forecast_demand'] 
-                               if pid in top_forecast_matched.index else 0 for pid in top_hist_ids],
-                width, label='Forecast (6mo)', color='coral', alpha=0.8)
+ax3.bar(x - width/2, [top_hist_matched.loc[pid, 'total_hist_demand'] for pid in top_hist_ids],
+        width, label='Historical', color='steelblue', alpha=0.8)
+ax3.bar(x + width/2, [top_forecast_matched.loc[pid, 'total_forecast_demand'] 
+                       if pid in top_forecast_matched.index else 0 for pid in top_hist_ids],
+        width, label='Forecast (6mo)', color='coral', alpha=0.8)
 
 ax3.set_xlabel('Product ID', fontweight='bold')
 ax3.set_ylabel('Demand ($)', fontweight='bold')
@@ -687,135 +684,115 @@ ax3.grid(axis='y', alpha=0.3)
 ax3.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
 
 plt.tight_layout()
-out3 = os.path.join(base_dir, "enhanced_viz3_hist_vs_forecast.png")
-plt.savefig(out3, dpi=300, bbox_inches='tight')
 plt.show()
-print(f"✓ Saved: {out3}")
+print("✓ Displayed: Historical vs Forecast")
 
-# 4) Category Forecast Breakdown
-fig4, axes4 = plt.subplots(1, 2, figsize=(14, 6))
-fig4.suptitle('Category Demand Forecast (Next 6 Months)', fontsize=16, fontweight='bold')
-
-# Bar chart
-axes4[0].barh(category_forecast['category'], category_forecast['total_forecast_demand'], 
-              color=colors[:len(category_forecast)])
-axes4[0].set_xlabel('Forecast Demand ($)', fontweight='bold')
-axes4[0].set_title('Total Forecast by Category', fontweight='bold')
-axes4[0].xaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
-axes4[0].grid(axis='x', alpha=0.3)
-
-# Pie chart
-axes4[1].pie(category_forecast['total_forecast_demand'], 
-             labels=category_forecast['category'],
-             autopct='%1.1f%%', startangle=90, colors=colors[:len(category_forecast)])
-axes4[1].set_title('Forecast Share by Category', fontweight='bold')
-
-plt.tight_layout()
-out4 = os.path.join(base_dir, "enhanced_viz4_category_forecast.png")
-plt.savefig(out4, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"✓ Saved: {out4}")
-
-# 5) Seasonal Forecast
-fig5, ax5 = plt.subplots(figsize=(10, 6))
+# 4) Seasonal Forecast
+fig4, ax4 = plt.subplots(figsize=(10, 6))
 
 season_order = ['Spring', 'Summer', 'Fall', 'Winter']
 seasonal_forecast_sorted = seasonal_forecast.set_index('season').reindex(season_order).reset_index()
 seasonal_forecast_sorted = seasonal_forecast_sorted.dropna()
 
-bars = ax5.bar(seasonal_forecast_sorted['season'], 
+bars = ax4.bar(seasonal_forecast_sorted['season'], 
                seasonal_forecast_sorted['total_forecast_demand'],
                color=['#90EE90', '#FFD700', '#FF8C00', '#87CEEB'])
 
-ax5.set_xlabel('Season', fontweight='bold')
-ax5.set_ylabel('Forecast Demand ($)', fontweight='bold')
-ax5.set_title('Seasonal Demand Forecast (Next 6 Months)', fontsize=14, fontweight='bold')
-ax5.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
-ax5.grid(axis='y', alpha=0.3)
+ax4.set_xlabel('Season', fontweight='bold')
+ax4.set_ylabel('Forecast Demand ($)', fontweight='bold')
+ax4.set_title('Seasonal Demand Forecast (Next 6 Months)', fontsize=14, fontweight='bold')
+ax4.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+ax4.grid(axis='y', alpha=0.3)
 
-# Add value labels on bars
 for bar in bars:
     height = bar.get_height()
-    ax5.text(bar.get_x() + bar.get_width()/2., height,
+    ax4.text(bar.get_x() + bar.get_width()/2., height,
              f'${height:,.0f}', ha='center', va='bottom', fontweight='bold')
 
 plt.tight_layout()
-out5 = os.path.join(base_dir, "enhanced_viz5_seasonal_forecast.png")
-plt.savefig(out5, dpi=300, bbox_inches='tight')
 plt.show()
-print(f"✓ Saved: {out5}")
+print("✓ Displayed: Seasonal Forecast")
+
+# 5) Category Forecast
+fig5, ax5 = plt.subplots(figsize=(12, 6))
+
+ax5.barh(category_forecast['category'], category_forecast['total_forecast_demand'], 
+         color=colors[:len(category_forecast)])
+ax5.set_xlabel('Forecast Demand ($)', fontweight='bold')
+ax5.set_title('Category Demand Forecast (Next 6 Months)', fontsize=14, fontweight='bold')
+ax5.xaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+ax5.grid(axis='x', alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+print("✓ Displayed: Category Forecast")
 
 # 6) ABC Forecast Breakdown
-fig6, axes6 = plt.subplots(1, 2, figsize=(14, 6))
-fig6.suptitle('ABC Category Forecast (Next 6 Months)', fontsize=16, fontweight='bold')
+fig6, ax6 = plt.subplots(figsize=(10, 6))
 
-abc_colors = {'A': '#ff9999', 'B': '#66b3ff', 'C': '#99ff99'}
-colors_abc = [abc_colors.get(cat, '#cccccc') for cat in abc_forecast['abc_category']]
+abc_colors_map = {'A': '#ff9999', 'B': '#66b3ff', 'C': '#99ff99'}
+colors_abc = [abc_colors_map.get(cat, '#cccccc') for cat in abc_forecast['abc_category']]
 
-# Bar chart
-axes6[0].bar(abc_forecast['abc_category'], abc_forecast['total_forecast_demand'], 
-             color=colors_abc)
-axes6[0].set_xlabel('ABC Category', fontweight='bold')
-axes6[0].set_ylabel('Forecast Demand ($)', fontweight='bold')
-axes6[0].set_title('Total Forecast by ABC Category', fontweight='bold')
-axes6[0].yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
-axes6[0].grid(axis='y', alpha=0.3)
+ax6.bar(abc_forecast['abc_category'], abc_forecast['total_forecast_demand'], color=colors_abc)
+ax6.set_xlabel('ABC Category', fontweight='bold')
+ax6.set_ylabel('Forecast Demand ($)', fontweight='bold')
+ax6.set_title('ABC Category Forecast (Next 6 Months)', fontsize=14, fontweight='bold')
+ax6.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+ax6.grid(axis='y', alpha=0.3)
 
-# Add percentage labels
 total_forecast = abc_forecast['total_forecast_demand'].sum()
 for i, (cat, val) in enumerate(zip(abc_forecast['abc_category'], abc_forecast['total_forecast_demand'])):
     pct = (val / total_forecast) * 100
-    axes6[0].text(i, val, f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
-
-# Pie chart
-axes6[1].pie(abc_forecast['total_forecast_demand'], 
-             labels=abc_forecast['abc_category'],
-             autopct='%1.1f%%', startangle=90, colors=colors_abc)
-axes6[1].set_title('Forecast Share by ABC Category', fontweight='bold')
+    ax6.text(i, val, f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
 
 plt.tight_layout()
-out6 = os.path.join(base_dir, "enhanced_viz6_abc_forecast.png")
-plt.savefig(out6, dpi=300, bbox_inches='tight')
 plt.show()
-print(f"✓ Saved: {out6}")
+print("✓ Displayed: ABC Forecast")
 
-# 7) Top 10 Forecast Products with ABC Labels
+# 7) Top 10 Forecast Products
 fig7, ax7 = plt.subplots(figsize=(12, 8))
 
 top_10_forecast = product_forecast.head(10).copy()
-abc_colors_map = {'A': '#ff9999', 'B': '#66b3ff', 'C': '#99ff99'}
 bar_colors = [abc_colors_map.get(abc, '#cccccc') for abc in top_10_forecast['abc_category']]
 
-bars = ax7.barh(range(len(top_10_forecast)), top_10_forecast['total_forecast_demand'], 
-                color=bar_colors)
-
+ax7.barh(range(len(top_10_forecast)), top_10_forecast['total_forecast_demand'], color=bar_colors)
 ax7.set_yticks(range(len(top_10_forecast)))
-ax7.set_yticklabels([f"{row['product_id']}\n({row['abc_category']})" 
+ax7.set_yticklabels([f"{row['product_id']} ({row['abc_category']})" 
                       for _, row in top_10_forecast.iterrows()])
 ax7.set_xlabel('Forecast Demand ($)', fontweight='bold')
-ax7.set_title('Top 10 Forecasted Products (Next 6 Months) - Color by ABC', 
-              fontsize=14, fontweight='bold')
+ax7.set_title('Top 10 Forecasted Products (Next 6 Months)', fontsize=14, fontweight='bold')
 ax7.xaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
 ax7.grid(axis='x', alpha=0.3)
 ax7.invert_yaxis()
 
-# Add legend
-from matplotlib.patches import Patch
-legend_elements = [Patch(facecolor='#ff9999', label='A - High Value'),
-                   Patch(facecolor='#66b3ff', label='B - Medium Value'),
-                   Patch(facecolor='#99ff99', label='C - Low Value')]
-ax7.legend(handles=legend_elements, loc='lower right')
+plt.tight_layout()
+plt.show()
+print("✓ Displayed: Top 10 Forecast Products")
+
+# 8) Monthly Category Trend
+fig8, ax8 = plt.subplots(figsize=(14, 7))
+
+monthly_category = future_df.groupby(['date', 'category'])['predicted_demand'].sum().reset_index()
+
+for category in monthly_category['category'].unique():
+    cat_data = monthly_category[monthly_category['category'] == category]
+    ax8.plot(cat_data['date'], cat_data['predicted_demand'], marker='o', label=category, linewidth=2)
+
+ax8.set_xlabel('Month', fontweight='bold')
+ax8.set_ylabel('Forecast Demand ($)', fontweight='bold')
+ax8.set_title('Monthly Forecast Trend by Category (Next 6 Months)', fontsize=14, fontweight='bold')
+ax8.legend(loc='best')
+ax8.grid(alpha=0.3)
+ax8.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+plt.xticks(rotation=45)
 
 plt.tight_layout()
-out7 = os.path.join(base_dir, "enhanced_viz7_top10_forecast_abc.png")
-plt.savefig(out7, dpi=300, bbox_inches='tight')
 plt.show()
-print(f"✓ Saved: {out7}")
+print("✓ Displayed: Monthly Category Trend")
 
-# 8) Actual vs Predicted (Test Set) for Best Model
-fig8, ax8 = plt.subplots(figsize=(12, 8))
+# 9) Actual vs Predicted
+fig9, ax9 = plt.subplots(figsize=(12, 8))
 
-# Sample 500 points for clarity
 sample_size = min(500, len(y_sku_test))
 sample_indices = np.random.choice(len(y_sku_test), sample_size, replace=False)
 
@@ -830,77 +807,183 @@ else:
 
 y_test_sample = y_sku_test.values[sample_indices]
 
-ax8.scatter(y_test_sample, y_pred_best, alpha=0.5, s=30)
-ax8.plot([y_test_sample.min(), y_test_sample.max()], 
+ax9.scatter(y_test_sample, y_pred_best, alpha=0.5, s=30)
+ax9.plot([y_test_sample.min(), y_test_sample.max()], 
          [y_test_sample.min(), y_test_sample.max()], 
          'r--', lw=2, label='Perfect Prediction')
 
-ax8.set_xlabel('Actual Demand ($)', fontweight='bold')
-ax8.set_ylabel('Predicted Demand ($)', fontweight='bold')
-ax8.set_title(f'Actual vs Predicted - {best_model_sku["name"]} (Test Set Sample)', 
+ax9.set_xlabel('Actual Demand ($)', fontweight='bold')
+ax9.set_ylabel('Predicted Demand ($)', fontweight='bold')
+ax9.set_title(f'Actual vs Predicted - {best_model_sku["name"]} (Test Set Sample)', 
               fontsize=14, fontweight='bold')
-ax8.legend()
-ax8.grid(alpha=0.3)
+ax9.legend()
+ax9.grid(alpha=0.3)
 
-# Add metrics text box
 textstr = f"MAE: ${best_model_sku['mae']:.2f}\nRMSE: ${best_model_sku['rmse']:.2f}\nMAPE: {best_model_sku['mape']:.2f}%"
 props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-ax8.text(0.05, 0.95, textstr, transform=ax8.transAxes, fontsize=11,
+ax9.text(0.05, 0.95, textstr, transform=ax9.transAxes, fontsize=11,
          verticalalignment='top', bbox=props)
-plt.tight_layout()
-out8 = os.path.join(base_dir, "enhanced_viz8_actual_vs_predicted.png")
-plt.savefig(out8, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"✓ Saved: {out8}")
-
-# 9) Monthly Forecast Trend by Category
-fig9, ax9 = plt.subplots(figsize=(14, 7))
-
-monthly_category = future_df.groupby(['date', 'category'])['predicted_demand'].sum().reset_index()
-
-for category in monthly_category['category'].unique():
-    cat_data = monthly_category[monthly_category['category'] == category]
-    ax9.plot(cat_data['date'], cat_data['predicted_demand'], 
-             marker='o', label=category, linewidth=2)
-
-ax9.set_xlabel('Month', fontweight='bold')
-ax9.set_ylabel('Forecast Demand ($)', fontweight='bold')
-ax9.set_title('Monthly Forecast Trend by Category (Next 6 Months)', 
-              fontsize=14, fontweight='bold')
-ax9.legend(loc='best')
-ax9.grid(alpha=0.3)
-ax9.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
-plt.xticks(rotation=45)
 
 plt.tight_layout()
-out9 = os.path.join(base_dir, "enhanced_viz9_monthly_category_trend.png")
-plt.savefig(out9, dpi=300, bbox_inches='tight')
 plt.show()
-print(f"✓ Saved: {out9}")
+print("✓ Displayed: Actual vs Predicted")
 
-# 10) Feature Importance (for tree-based models)
+# 10) Feature Importance
 if hasattr(xgb_sku_model, 'feature_importances_'):
     fig10, ax10 = plt.subplots(figsize=(10, 8))
     
-    feature_importance = pd.DataFrame({
+    feature_importance_df = pd.DataFrame({
         'feature': sku_feature_cols,
         'importance': xgb_sku_model.feature_importances_
     }).sort_values('importance', ascending=True).tail(15)
     
-    ax10.barh(feature_importance['feature'], feature_importance['importance'], 
-              color='steelblue')
+    ax10.barh(feature_importance_df['feature'], feature_importance_df['importance'], color='steelblue')
     ax10.set_xlabel('Importance', fontweight='bold')
-    ax10.set_title('Top 15 Feature Importance - Enhanced XGBoost Model', 
-                   fontsize=14, fontweight='bold')
+    ax10.set_title('Top 15 Feature Importance - Enhanced XGBoost Model', fontsize=14, fontweight='bold')
     ax10.grid(axis='x', alpha=0.3)
     
     plt.tight_layout()
-    out10 = os.path.join(base_dir, "enhanced_viz10_feature_importance.png")
-    plt.savefig(out10, dpi=300, bbox_inches='tight')
     plt.show()
-    print(f"✓ Saved: {out10}")
+    print("✓ Displayed: Feature Importance")
 
-print("\n✓ All visualizations generated successfully!")
+print("\n✓ All visualizations displayed!")
+
+# =============================================================================
+# CSV EXPORTS FOR POWER BI
+# =============================================================================
+print("\nGenerating CSV files for Power BI...")
+
+# 1) Historical vs Forecast Comparison
+hist_vs_forecast = pd.DataFrame({
+    'product_id': top_hist_ids
+})
+
+hist_vs_forecast = hist_vs_forecast.merge(
+    top_hist_products[['product_id', 'total_hist_demand', 'category', 'abc_category']], 
+    on='product_id', 
+    how='left'
+)
+hist_vs_forecast = hist_vs_forecast.merge(
+    top_forecast_matched.reset_index()[['product_id', 'total_forecast_demand']], 
+    on='product_id', 
+    how='left'
+)
+hist_vs_forecast['total_forecast_demand'] = hist_vs_forecast['total_forecast_demand'].fillna(0)
+
+hist_vs_forecast.to_csv(os.path.join(export_dir, "viz_hist_vs_forecast_comparison.csv"), index=False)
+print("✓ Saved: viz_hist_vs_forecast_comparison.csv")
+
+# 2) Monthly Forecast Trend by Category
+monthly_category.rename(columns={'predicted_demand': 'forecast_demand'}, inplace=True)
+monthly_category.to_csv(os.path.join(export_dir, "viz_monthly_category_trend.csv"), index=False)
+print("✓ Saved: viz_monthly_category_trend.csv")
+
+# 3) Actual vs Predicted
+actual_vs_predicted = pd.DataFrame({
+    'actual_demand': y_sku_test.values,
+    'predicted_demand_xgb': y_sku_pred_xgb,
+    'predicted_demand_rf': y_sku_pred_rf,
+    'predicted_demand_linear': y_sku_pred_lin,
+    'predicted_demand_ensemble': y_sku_pred_ensemble,
+    'date': dates_sku_test.values
+})
+actual_vs_predicted.to_csv(os.path.join(export_dir, "viz_actual_vs_predicted.csv"), index=False)
+print("✓ Saved: viz_actual_vs_predicted.csv")
+
+# 4) Feature Importance
+if hasattr(xgb_sku_model, 'feature_importances_'):
+    feature_importance = pd.DataFrame({
+        'feature': sku_feature_cols,
+        'importance': xgb_sku_model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    feature_importance.to_csv(os.path.join(export_dir, "viz_feature_importance.csv"), index=False)
+    print("✓ Saved: viz_feature_importance.csv")
+
+# 5) ABC Summary with Percentages
+abc_summary_pct = abc_summary.copy()
+abc_summary_pct['sales_percentage'] = abc_summary_pct['sales_pct']
+abc_summary_pct['product_percentage'] = (abc_summary_pct['product_id'] / 
+                                          abc_summary_pct['product_id'].sum() * 100)
+abc_summary_pct.to_csv(os.path.join(export_dir, "viz_abc_summary.csv"), index=False)
+print("✓ Saved: viz_abc_summary.csv")
+
+# 6) ABC Forecast with Percentages
+abc_forecast_pct = abc_forecast.copy()
+total_abc_forecast = abc_forecast_pct['total_forecast_demand'].sum()
+abc_forecast_pct['forecast_percentage'] = (abc_forecast_pct['total_forecast_demand'] / 
+                                            total_abc_forecast * 100)
+abc_forecast_pct.to_csv(os.path.join(export_dir, "viz_abc_forecast_detailed.csv"), index=False)
+print("✓ Saved: viz_abc_forecast_detailed.csv")
+
+# 7) Category Forecast with Percentages
+category_forecast_pct = category_forecast.copy()
+total_cat_forecast = category_forecast_pct['total_forecast_demand'].sum()
+category_forecast_pct['forecast_percentage'] = (category_forecast_pct['total_forecast_demand'] / 
+                                                 total_cat_forecast * 100)
+category_forecast_pct.to_csv(os.path.join(export_dir, "viz_category_forecast_detailed.csv"), index=False)
+print("✓ Saved: viz_category_forecast_detailed.csv")
+
+# 8) Seasonal Forecast with Percentages
+seasonal_forecast_pct = seasonal_forecast.copy()
+total_seasonal_forecast = seasonal_forecast_pct['total_forecast_demand'].sum()
+seasonal_forecast_pct['forecast_percentage'] = (seasonal_forecast_pct['total_forecast_demand'] / 
+                                                 total_seasonal_forecast * 100)
+
+season_order_map = {'Spring': 1, 'Summer': 2, 'Fall': 3, 'Winter': 4}
+seasonal_forecast_pct['season_order'] = seasonal_forecast_pct['season'].map(season_order_map)
+seasonal_forecast_pct = seasonal_forecast_pct.sort_values('season_order')
+
+seasonal_forecast_pct.to_csv(os.path.join(export_dir, "viz_seasonal_forecast_detailed.csv"), index=False)
+print("✓ Saved: viz_seasonal_forecast_detailed.csv")
+
+# 9) Top 10 Forecast Products with Rankings
+top_10_forecast_viz = product_forecast.head(10).copy()
+top_10_forecast_viz['rank'] = range(1, len(top_10_forecast_viz) + 1)
+top_10_forecast_viz.to_csv(os.path.join(export_dir, "viz_top10_forecast_products.csv"), index=False)
+print("✓ Saved: viz_top10_forecast_products.csv")
+
+# 10) Time Series Historical Demand
+historical_product_timeseries = demand_df[demand_df['product_id'].isin(top_hist_ids)].copy()
+historical_product_timeseries = historical_product_timeseries[['date', 'product_id', 'category', 
+                                                                 'abc_category', 'daily_sales']]
+historical_product_timeseries.to_csv(os.path.join(export_dir, "viz_historical_timeseries.csv"), index=False)
+print("✓ Saved: viz_historical_timeseries.csv")
+
+# 11) Combined Historical + Forecast Timeline
+historical_timeline = demand_df.groupby('date')['daily_sales'].sum().reset_index()
+historical_timeline.rename(columns={'daily_sales': 'demand'}, inplace=True)
+historical_timeline['type'] = 'Historical'
+
+forecast_timeline = future_df.groupby('date')['predicted_demand'].sum().reset_index()
+forecast_timeline.rename(columns={'predicted_demand': 'demand'}, inplace=True)
+forecast_timeline['type'] = 'Forecast'
+
+combined_timeline = pd.concat([historical_timeline, forecast_timeline], ignore_index=True)
+combined_timeline = combined_timeline.sort_values('date')
+combined_timeline.to_csv(os.path.join(export_dir, "viz_combined_timeline.csv"), index=False)
+print("✓ Saved: viz_combined_timeline.csv")
+
+# 12) Product Performance Matrix
+product_performance = demand_df.groupby(['product_id', 'category', 'abc_category']).agg({
+    'daily_sales': ['sum', 'mean', 'std'],
+    'num_transactions': 'sum'
+}).reset_index()
+
+product_performance.columns = ['product_id', 'category', 'abc_category', 
+                                'total_sales', 'avg_sales', 'sales_volatility', 'total_transactions']
+
+product_performance = product_performance.merge(
+    product_forecast[['product_id', 'total_forecast_demand']], 
+    on='product_id', 
+    how='left'
+)
+product_performance['total_forecast_demand'] = product_performance['total_forecast_demand'].fillna(0)
+
+product_performance.to_csv(os.path.join(export_dir, "viz_product_performance_matrix.csv"), index=False)
+print("✓ Saved: viz_product_performance_matrix.csv")
+
+print("\n✓ All CSV files for Power BI generated successfully!")
 
 print("\n" + "=" * 100)
 print("ENHANCED FORECASTING COMPLETE")

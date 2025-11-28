@@ -362,19 +362,34 @@ for _, row in top_products_forecast.iterrows():
           f"Avg Daily: {row['avg_daily_demand']:.2f}")
 
 # 3.6 Seasonal forecast of product demand (next 6 months)
-if 'season' in future_df.columns and future_df['season'].notna().any():
-    seasonal_forecast = (
-        future_df.groupby('season')['predicted_demand']
-                 .sum()
-                 .reset_index()
-                 .rename(columns={'predicted_demand': 'total_forecast_demand'})
-                 .sort_values('total_forecast_demand', ascending=False)
-    )
-    print(f"\nFORECASTED PRODUCT DEMAND BY SEASON (NEXT {forecast_horizon_days} DAYS):")
-    print("-" * 100)
-    print(seasonal_forecast)
-else:
-    seasonal_forecast = pd.DataFrame(columns=['season', 'total_forecast_demand'])
+future_season_df = future_df.copy()
+
+# Make sure rows are ordered by date
+future_season_df = future_season_df.sort_values('date').reset_index(drop=True)
+
+# Horizon index: 1..forecast_horizon_days (one per forecast day)
+future_season_df["horizon_day"] = (
+    (future_season_df["date"] - future_season_df["date"].min()).dt.days + 1
+)
+
+# Assign reporting seasons based on position in the 180-day horizon
+half_horizon = forecast_horizon_days // 2  # 90 if horizon is 180
+future_season_df["season"] = np.where(
+    future_season_df["horizon_day"] <= half_horizon, "Fall", "Winter"
+)
+
+# Aggregate forecasted demand by these reporting seasons
+seasonal_forecast = (
+    future_season_df.groupby("season")["predicted_demand"]
+    .sum()
+    .reset_index()
+    .rename(columns={"predicted_demand": "total_forecast_demand"})
+    .sort_values("total_forecast_demand", ascending=False)
+)
+
+print(f"\nFORECASTED PRODUCT DEMAND BY SEASON (NEXT {forecast_horizon_days} DAYS):")
+print("-" * 100)
+print(seasonal_forecast.to_string(index=False))
 
 # =============================================================================
 # PART 4: WEEKLY CATEGORY-LEVEL DATASET & MODELING

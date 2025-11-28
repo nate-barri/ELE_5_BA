@@ -560,7 +560,95 @@ model_comparison = pd.DataFrame([
 ])
 model_comparison.to_csv(os.path.join(export_dir, "model_comparison.csv"), index=False)
 
-print("✓ All enhanced exports saved")
+# Export detailed evaluation metrics for each model
+metrics_detailed = pd.DataFrame({
+    'model_name': ['Enhanced XGBoost', 'Random Forest', 'Linear Regression', 'Ensemble'],
+    'mae': [metrics_xgb_sku['mae'], metrics_rf_sku['mae'], 
+            metrics_lin_sku['mae'], metrics_ensemble_sku['mae']],
+    'rmse': [metrics_xgb_sku['rmse'], metrics_rf_sku['rmse'], 
+             metrics_lin_sku['rmse'], metrics_ensemble_sku['rmse']],
+    'mase': [metrics_xgb_sku['mase'], metrics_rf_sku['mase'], 
+             metrics_lin_sku['mase'], metrics_ensemble_sku['mase']],
+    'mape': [metrics_xgb_sku['mape'], metrics_rf_sku['mape'], 
+             metrics_lin_sku['mape'], metrics_ensemble_sku['mape']],
+    'best_model': [
+        best_model_sku['name'] == 'Enhanced XGBoost',
+        best_model_sku['name'] == 'Random Forest',
+        best_model_sku['name'] == 'Linear Regression (PRIMARY)',
+        best_model_sku['name'] == 'Ensemble (Average)'
+    ]
+})
+metrics_detailed.to_csv(os.path.join(export_dir, "eval_metrics_detailed.csv"), index=False)
+
+# Export metrics in long format for easier visualization in Power BI
+metrics_long = []
+for model_data in [metrics_xgb_sku, metrics_rf_sku, metrics_lin_sku, metrics_ensemble_sku]:
+    metrics_long.append({'model': model_data['name'], 'metric': 'MAE', 'value': model_data['mae']})
+    metrics_long.append({'model': model_data['name'], 'metric': 'RMSE', 'value': model_data['rmse']})
+    metrics_long.append({'model': model_data['name'], 'metric': 'MASE', 'value': model_data['mase']})
+    metrics_long.append({'model': model_data['name'], 'metric': 'MAPE', 'value': model_data['mape']})
+
+metrics_long_df = pd.DataFrame(metrics_long)
+metrics_long_df.to_csv(os.path.join(export_dir, "eval_metrics_long_format.csv"), index=False)
+
+# Export comprehensive model summary with all models and justification
+all_models_summary = pd.DataFrame([
+    {
+        'model_name': 'Enhanced XGBoost',
+        'mae': metrics_xgb_sku['mae'],
+        'rmse': metrics_xgb_sku['rmse'],
+        'mase': metrics_xgb_sku['mase'],
+        'mape': metrics_xgb_sku['mape'],
+        'is_best_model': best_model_sku['name'] == 'Enhanced XGBoost',
+        'model_type': 'Tree-Based Ensemble',
+        'key_strengths': 'Handles non-linear relationships; robust to outliers; regularization prevents overfitting',
+        'use_case': 'Best for complex demand patterns with interactions between features'
+    },
+    {
+        'model_name': 'Random Forest',
+        'mae': metrics_rf_sku['mae'],
+        'rmse': metrics_rf_sku['rmse'],
+        'mase': metrics_rf_sku['mase'],
+        'mape': metrics_rf_sku['mape'],
+        'is_best_model': best_model_sku['name'] == 'Random Forest',
+        'model_type': 'Tree-Based Ensemble',
+        'key_strengths': 'Reduces variance through bagging; less prone to overfitting; handles missing data well',
+        'use_case': 'Reliable baseline for diverse product categories with varying demand patterns'
+    },
+    {
+        'model_name': 'Linear Regression',
+        'mae': metrics_lin_sku['mae'],
+        'rmse': metrics_lin_sku['rmse'],
+        'mase': metrics_lin_sku['mase'],
+        'mape': metrics_lin_sku['mape'],
+        'is_best_model': best_model_sku['name'] == 'Linear Regression (PRIMARY)',
+        'model_type': 'Linear Model',
+        'key_strengths': 'Interpretable coefficients; fast training; stable predictions; works well with scaled features',
+        'use_case': 'Primary model when demand follows linear trends and for easy business interpretation'
+    },
+    {
+        'model_name': 'Ensemble (Average)',
+        'mae': metrics_ensemble_sku['mae'],
+        'rmse': metrics_ensemble_sku['rmse'],
+        'mase': metrics_ensemble_sku['mase'],
+        'mape': metrics_ensemble_sku['mape'],
+        'is_best_model': best_model_sku['name'] == 'Ensemble (Average)',
+        'model_type': 'Model Ensemble',
+        'key_strengths': 'Combines strengths of all models; reduces prediction variance; more robust to data shifts',
+        'use_case': 'Best overall approach when no single model consistently outperforms; reduces risk'
+    }
+])
+
+all_models_summary['rank'] = all_models_summary['mae'].rank().astype(int)
+all_models_summary = all_models_summary.sort_values('mae')
+
+all_models_summary.to_csv(os.path.join(export_dir, "all_models_summary.csv"), index=False)
+
+# Also keep a simple best model file
+best_model_only = all_models_summary[all_models_summary['is_best_model'] == True]
+best_model_only.to_csv(os.path.join(export_dir, "best_model_summary.csv"), index=False)
+print(" All enhanced exports saved (including evaluation metrics)")
+print("✓ All enhanced exports saved (including evaluation metrics)")
 
 # =============================================================================
 # SUMMARY
@@ -598,7 +686,7 @@ plt.style.use('seaborn-v0_8-darkgrid')
 colors = plt.cm.Set3(np.linspace(0, 1, 10))
 
 # =============================================================================
-# DISPLAY VISUALIZATIONS (NO PNG SAVING)
+# DISPLAY VISUALIZATIONS 
 # =============================================================================
 print("\nDisplaying visualizations...")
 

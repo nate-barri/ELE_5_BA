@@ -13,19 +13,108 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 import warnings
 warnings.filterwarnings('ignore')
 
-# XGBoost (main model for demand forecasting)
+# XGBoost
 try:
     from xgboost import XGBRegressor
 except ImportError:
     raise ImportError("XGBoost is not installed. Please run: pip install xgboost")
 
+# =====================================================================
+# FIXED SEASON MAPPING
+# =====================================================================
+def assign_season(month: int) -> str:
+    """Map calendar month to season."""
+    if month in [3, 4, 5]:
+        return "Spring"
+    elif month in [6, 7, 8]:
+        return "Summer"
+    elif month in [9, 10, 11]:
+        return "Fall"
+    else:
+        return "Winter"
+
+
+# =====================================================================
+# ABC ANALYSIS FOR PRODUCT SEGMENTATION
+# =====================================================================
+def perform_abc_analysis(df, value_col='total_sales', id_col='product_id'):
+    """
+    Classify products into A, B, C categories based on sales contribution.
+    A: Top 20% of products contributing 80% of sales
+    B: Next 30% contributing 15% of sales
+    C: Remaining 50% contributing 5% of sales
+    """
+    product_sales = df.groupby(id_col)[value_col].sum().reset_index()
+    product_sales = product_sales.sort_values(value_col, ascending=False)
+    product_sales['cumulative_sales'] = product_sales[value_col].cumsum()
+    product_sales['cumulative_pct'] = (product_sales['cumulative_sales'] / 
+                                       product_sales[value_col].sum() * 100)
+    
+    product_sales['abc_category'] = 'C'
+    product_sales.loc[product_sales['cumulative_pct'] <= 80, 'abc_category'] = 'A'
+    product_sales.loc[(product_sales['cumulative_pct'] > 80) & 
+                     (product_sales['cumulative_pct'] <= 95), 'abc_category'] = 'B'
+    
+    return product_sales[[id_col, 'abc_category']]
+
+
+# =====================================================================
+# METRICS
+# =====================================================================
+def compute_mase(y_true, y_pred, seasonality=1):
+    """Mean Absolute Scaled Error (MASE)"""
+    y_true = np.array(y_true, dtype=float)
+    y_pred = np.array(y_pred, dtype=float)
+    
+    if len(y_true) <= seasonality + 1:
+        return np.nan
+    
+    naive_actual = y_true[seasonality:]
+    naive_forecast = y_true[:-seasonality]
+    mae_naive = np.mean(np.abs(naive_actual - naive_forecast)) + 1e-8
+    mae_model = np.mean(np.abs(y_true[seasonality:] - y_pred[seasonality:]))
+    
+    return mae_model / mae_naive
+
+
+
+
+def compute_mape(y_true, y_pred):
+    """Mean Absolute Percentage Error"""
+    y_true = np.array(y_true, dtype=float)
+    y_pred = np.array(y_pred, dtype=float)
+    
+    # Avoid division by zero - only calculate MAPE for non-zero actuals
+    mask = y_true != 0
+    if not mask.any():
+        return np.nan
+    
+    return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
+
+
+def evaluate_model(name, y_true, y_pred):
+    """Evaluate model with multiple metrics"""
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mase = compute_mase(y_true, y_pred, seasonality=1)
+    mape = compute_mape(y_true, y_pred)  # Add MAPE
+    
+    print(f"\n{name}")
+    print("-" * 60)
+    print(f"MAE:   {mae:.4f}")
+    print(f"RMSE:  {rmse:.4f}")
+    print(f"MASE:  {mase:.4f}")
+    print(f"MAPE:  {mape:.2f}%")  # Display MAPE
+    return {'name': name, 'mae': mae, 'rmse': rmse, 'mase': mase,'mape': mape}
 
 # =============================================================================
 # PART 0: DATA INGESTION
 # =============================================================================
+print("=" * 100)
+print(" " * 15 + "ENHANCED SKU-LEVEL & WEEKLY CATEGORY-LEVEL DEMAND FORECASTING")
+print("=" * 100)
 
 df = pd.read_csv("ETL/dataset_ele_5_cleaned_adjusted.csv")
-
 df['purchase_date'] = pd.to_datetime(df['purchase_date'])
 df = df.sort_values('purchase_date').reset_index(drop=True)
 
@@ -41,9 +130,6 @@ for col, default_val in optional_cols.items():
     if col not in df.columns:
         df[col] = default_val
 
-print("=" * 100)
-print(" " * 20 + "SKU-LEVEL & WEEKLY CATEGORY-LEVEL DEMAND FORECASTING")
-print("=" * 100)
 print(f"\nDataset: {len(df):,} transactions")
 print(f"Date Range: {df['purchase_date'].min().strftime('%Y-%m-%d')} "
       f"to {df['purchase_date'].max().strftime('%Y-%m-%d')}")
@@ -51,16 +137,33 @@ print(f"Total Sales: ${df['total_sales'].sum():,.2f}")
 print(f"Unique Products: {df['product_id'].nunique():,}")
 print(f"Categories: {df['category'].nunique():,}")
 
-# =============================================================================
-# PART 1: DAILY PRODUCT-LEVEL DATASET (SKU) + DESCRIPTIVE
-# =============================================================================
+# Perform ABC Analysis
+abc_classification = perform_abc_analysis(df)
+df = df.merge(abc_classification, on='product_id', how='left')
 
 print("\n" + "=" * 100)
-print("PART 1: DAILY PRODUCT DEMAND (SKU-LEVEL) + DESCRIPTIVE")
+print("ABC ANALYSIS RESULTS")
+print("=" * 100)
+abc_summary = df.groupby('abc_category').agg({
+    'product_id': 'nunique',
+    'total_sales': 'sum'
+}).reset_index()
+abc_summary['sales_pct'] = (abc_summary['total_sales'] / 
+                             abc_summary['total_sales'].sum() * 100)
+print(abc_summary)
+
+
+# =============================================================================
+# PART 1: MONTHLY PRODUCT-LEVEL DATASET (SKU) + DESCRIPTIVE
+# =============================================================================
+print("\n" + "=" * 100)
+print("PART 1: MONTHLY PRODUCT DEMAND (SKU-LEVEL) - ENHANCED")
 print("=" * 100)
 
-demand_df = (
-    df.groupby(['purchase_date', 'product_id', 'category'])
+df['month_start'] = df['purchase_date'].values.astype('datetime64[M]')
+
+demand_df_raw = (
+    df.groupby(['month_start', 'product_id', 'category', 'abc_category'])
       .agg(
           daily_sales=('total_sales', 'sum'),
           num_transactions=('total_sales', 'count'),
@@ -73,31 +176,81 @@ demand_df = (
       .reset_index()
 )
 
-demand_df.rename(columns={'purchase_date': 'date'}, inplace=True)
+demand_df_raw.rename(columns={'month_start': 'date'}, inplace=True)
 
-# Attach season information from original df if available
-if 'season' in df.columns:
-    season_map = df[['purchase_date', 'season']].drop_duplicates()
-    season_map = season_map.rename(columns={'purchase_date': 'date'})
-    demand_df = demand_df.merge(season_map, on='date', how='left')
-else:
-    demand_df['season'] = np.nan
+# Build full grid
+full_months = pd.date_range(
+    start=demand_df_raw['date'].min(),
+    end=demand_df_raw['date'].max(),
+    freq='MS'
+)
+calendar_df = pd.DataFrame({'date': full_months})
 
-for col in ['avg_rating', 'avg_markdown', 'avg_stock']:
-    demand_df[col] = demand_df[col].fillna(demand_df[col].median())
+product_cat = demand_df_raw[['product_id', 'category', 'abc_category']].drop_duplicates()
+product_cat['key'] = 1
+calendar_df['key'] = 1
 
-print(f"\nDaily product-level rows: {len(demand_df):,}")
-print(f"Unique product_ids in demand dataset: {demand_df['product_id'].nunique():,}")
+full_grid = calendar_df.merge(product_cat, on='key', how='outer').drop(columns='key')
+demand_df = full_grid.merge(
+    demand_df_raw,
+    on=['date', 'product_id', 'category', 'abc_category'],
+    how='left'
+)
 
-# ---- Historical best-selling products (SKU) ----
+# Fill missing values
+demand_df['daily_sales'] = demand_df['daily_sales'].fillna(0)
+demand_df['num_transactions'] = demand_df['num_transactions'].fillna(0)
+
+for col in ['avg_rating', 'avg_original_price', 'avg_current_price',
+            'avg_markdown', 'avg_stock']:
+    if col in demand_df.columns:
+        demand_df[col] = (
+            demand_df
+            .sort_values(['product_id', 'date'])
+            .groupby('product_id')[col]
+            .ffill()
+        )
+        demand_df[col] = demand_df[col].fillna(demand_df[col].median())
+
+demand_df['month'] = demand_df['date'].dt.month
+demand_df['season'] = demand_df['month'].apply(assign_season)
+month_to_season = {m: assign_season(m) for m in range(1, 13)}
+
+# =============================================================================
+# ENHANCED FEATURE ENGINEERING: ADD LAG FEATURES
+# =============================================================================
+print("\nAdding lag features and rolling statistics...")
+
+demand_df = demand_df.sort_values(['product_id', 'date']).reset_index(drop=True)
+
+# Add lag features per product
+for product in demand_df['product_id'].unique():
+    mask = demand_df['product_id'] == product
+    demand_df.loc[mask, 'lag_1_month'] = demand_df.loc[mask, 'daily_sales'].shift(1)
+    demand_df.loc[mask, 'lag_2_month'] = demand_df.loc[mask, 'daily_sales'].shift(2)
+    demand_df.loc[mask, 'lag_3_month'] = demand_df.loc[mask, 'daily_sales'].shift(3)
+    demand_df.loc[mask, 'rolling_mean_3m'] = demand_df.loc[mask, 'daily_sales'].rolling(3, min_periods=1).mean()
+    demand_df.loc[mask, 'rolling_std_3m'] = demand_df.loc[mask, 'daily_sales'].rolling(3, min_periods=1).std()
+
+# Fill NaN values
+demand_df['lag_1_month'] = demand_df['lag_1_month'].fillna(0)
+demand_df['lag_2_month'] = demand_df['lag_2_month'].fillna(0)
+demand_df['lag_3_month'] = demand_df['lag_3_month'].fillna(0)
+demand_df['rolling_mean_3m'] = demand_df['rolling_mean_3m'].fillna(0)
+demand_df['rolling_std_3m'] = demand_df['rolling_std_3m'].fillna(0)
+
+print(f"Monthly product-level rows: {len(demand_df):,}")
+print(f"Unique product_ids: {demand_df['product_id'].nunique():,}")
+
+# Historical analysis
 hist_product_demand = (
     demand_df.groupby('product_id')
              .agg(
                  total_hist_demand=('daily_sales', 'sum'),
                  avg_daily_demand=('daily_sales', 'mean'),
                  num_days_sold=('daily_sales', lambda x: (x > 0).sum()),
-                 category=('category', lambda x: x.mode().iloc[0]
-                           if not x.mode().empty else x.iloc[0])
+                 category=('category', lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]),
+                 abc_category=('abc_category', lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0])
              )
              .reset_index()
 )
@@ -109,67 +262,25 @@ top_hist_products = hist_product_demand.sort_values(
 
 print(f"\nTOP {top_hist_n} HISTORICAL BEST-SELLING PRODUCTS (SKU):")
 print("-" * 100)
-print(top_hist_products[['product_id', 'category',
-                         'total_hist_demand', 'avg_daily_demand',
-                         'num_days_sold']])
-
-# ---- Historical demand by category (for dashboard) ----
-cat_hist = (
-    demand_df.groupby('category')['daily_sales']
-             .sum()
-             .reset_index()
-             .rename(columns={'daily_sales': 'total_hist_demand'})
-)
-cat_hist['share_pct'] = (cat_hist['total_hist_demand']
-                         / cat_hist['total_hist_demand'].sum()) * 100
-
-print("\nHISTORICAL DEMAND BY CATEGORY:")
-print("-" * 100)
-print(cat_hist.sort_values('total_hist_demand', ascending=False))
-
-# ---- Historical demand by season (product demand) ----
-if 'season' in demand_df.columns and demand_df['season'].notna().any():
-    hist_season_demand = (
-        demand_df.groupby('season')['daily_sales']
-                 .sum()
-                 .reset_index()
-                 .rename(columns={'daily_sales': 'total_hist_demand'})
-                 .sort_values('total_hist_demand', ascending=False)
-    )
-    print("\nHISTORICAL PRODUCT DEMAND BY SEASON:")
-    print("-" * 100)
-    print(hist_season_demand)
-else:
-    hist_season_demand = pd.DataFrame(columns=['season', 'total_hist_demand'])
+print(top_hist_products[['product_id', 'category', 'abc_category',
+                         'total_hist_demand', 'avg_daily_demand', 'num_days_sold']])
 
 min_date = demand_df['date'].min()
 
-# Prepare month -> season mapping (for future dates)
-if 'season' in df.columns:
-    month_to_season = (
-        df.assign(month=df['purchase_date'].dt.month)
-          .groupby('month')['season']
-          .agg(lambda x: x.mode().iloc[0])
-          .to_dict()
-    )
-else:
-    month_to_season = {}
-
 # =============================================================================
-# PART 2: FEATURE ENGINEERING & MODELING (SKU-LEVEL FORECAST, DAILY)
+# PART 2: ENHANCED MODELING WITH REGULARIZED XGBOOST
 # =============================================================================
-
 print("\n" + "=" * 100)
-print("PART 2: SKU-LEVEL FEATURE ENGINEERING & MODELING (DAILY)")
+print("PART 2: SKU-LEVEL MODELING - ENHANCED")
 print("=" * 100)
 
 # Encodings
 demand_df['product_code'], product_unique = pd.factorize(demand_df['product_id'])
 demand_df['category_code'], category_unique = pd.factorize(demand_df['category'])
+demand_df['abc_code'], abc_unique = pd.factorize(demand_df['abc_category'])
 
 # Time features
 demand_df['year'] = demand_df['date'].dt.year
-demand_df['month'] = demand_df['date'].dt.month
 demand_df['day'] = demand_df['date'].dt.day
 demand_df['day_of_week'] = demand_df['date'].dt.dayofweek
 demand_df['day_of_year'] = demand_df['date'].dt.dayofyear
@@ -184,15 +295,18 @@ demand_df['dow_cos'] = np.cos(2 * np.pi * demand_df['day_of_week'] / 7)
 
 demand_df['global_trend'] = (demand_df['date'] - min_date).dt.days
 
+# Enhanced feature set with lags
 sku_target_col = 'daily_sales'
 sku_feature_cols = [
-    'product_code', 'category_code',
+    'product_code', 'category_code', 'abc_code',
     'avg_original_price', 'avg_current_price', 'avg_markdown',
     'avg_stock', 'avg_rating',
     'month', 'day_of_week', 'day_of_year', 'week_of_year', 'quarter',
     'is_weekend',
     'month_sin', 'month_cos', 'dow_sin', 'dow_cos',
-    'global_trend'
+    'global_trend',
+    'lag_1_month', 'lag_2_month', 'lag_3_month',
+    'rolling_mean_3m', 'rolling_std_3m'
 ]
 
 demand_df = demand_df.sort_values('date').reset_index(drop=True)
@@ -209,18 +323,21 @@ print(f"\nTraining Period (SKU): {dates_sku_train.min().strftime('%Y-%m-%d')} "
       f"to {dates_sku_train.max().strftime('%Y-%m-%d')}")
 print(f"Testing Period  (SKU): {dates_sku_test.min().strftime('%Y-%m-%d')} "
       f"to {dates_sku_test.max().strftime('%Y-%m-%d')}")
-print(f"Train samples (SKU): {len(X_sku_train):,}, Test samples (SKU): {len(X_sku_test):,}")
+print(f"Train samples: {len(X_sku_train):,}, Test samples: {len(X_sku_test):,}")
 
 scaler_sku = StandardScaler()
 X_sku_train_scaled = scaler_sku.fit_transform(X_sku_train)
 X_sku_test_scaled = scaler_sku.transform(X_sku_test)
 
-# ---- Train SKU-level models ----
-print("\nTraining XGBoost Regressor (MAIN MODEL, SKU-LEVEL)...")
+# Train models with improved hyperparameters
+print("\nTraining Enhanced XGBoost (with regularization)...")
 xgb_sku_model = XGBRegressor(
-    n_estimators=150,
-    learning_rate=0.05,
-    max_depth=5,
+    n_estimators=50,
+    learning_rate=0.1,
+    max_depth=3,
+    min_child_weight=3,
+    reg_alpha=0.1,
+    reg_lambda=1.0,
     subsample=0.8,
     colsample_bytree=0.8,
     objective='reg:squarederror',
@@ -229,662 +346,562 @@ xgb_sku_model = XGBRegressor(
 )
 xgb_sku_model.fit(X_sku_train, y_sku_train)
 
-print("Training Random Forest Regressor (BENCHMARK 1, SKU-LEVEL)...")
+print("Training Random Forest...")
 rf_sku_model = RandomForestRegressor(
     n_estimators=100,
-    max_depth=None,
-    min_samples_split=5,
-    min_samples_leaf=2,
+    max_depth=10,
+    min_samples_split=10,
+    min_samples_leaf=5,
     random_state=42,
     n_jobs=-1
 )
 rf_sku_model.fit(X_sku_train, y_sku_train)
 
-print("Training Linear Regression (BENCHMARK 2, SKU-LEVEL)...")
+print("Training Linear Regression (PRIMARY MODEL)...")
 lin_sku_model = LinearRegression()
 lin_sku_model.fit(X_sku_train_scaled, y_sku_train)
 
-def evaluate_model(name, y_true, y_pred):
-    mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mape = np.mean(np.abs((y_true - y_pred) / (y_true + 1))) * 100  # +1 avoids div-by-zero
-    print(f"\n{name}")
-    print("-" * 60)
-    print(f"MAE:   {mae:.4f}")
-    print(f"RMSE:  {rmse:.4f}")
-    print(f"MAPE:  {mape:.2f}%")
-    return {'name': name, 'mae': mae, 'rmse': rmse, 'mape': mape}
-
 print("\n" + "=" * 100)
-print("SKU-LEVEL MODEL EVALUATION (DAILY)")
+print("SKU-LEVEL MODEL EVALUATION")
 print("=" * 100)
 
 y_sku_pred_xgb = xgb_sku_model.predict(X_sku_test)
 y_sku_pred_rf = rf_sku_model.predict(X_sku_test)
 y_sku_pred_lin = lin_sku_model.predict(X_sku_test_scaled)
 
-metrics_xgb_sku = evaluate_model("XGBoost (MAIN MODEL, SKU)", y_sku_test, y_sku_pred_xgb)
-metrics_rf_sku = evaluate_model("Random Forest (BENCHMARK 1, SKU)", y_sku_test, y_sku_pred_rf)
-metrics_lin_sku = evaluate_model("Linear Regression (BENCHMARK 2, SKU)", y_sku_test, y_sku_pred_lin)
+metrics_xgb_sku = evaluate_model("Enhanced XGBoost", y_sku_test, y_sku_pred_xgb)
+metrics_rf_sku = evaluate_model("Random Forest", y_sku_test, y_sku_pred_rf)
+metrics_lin_sku = evaluate_model("Linear Regression (PRIMARY)", y_sku_test, y_sku_pred_lin)
+
+# Ensemble model (average of all three)
+y_sku_pred_ensemble = (y_sku_pred_xgb + y_sku_pred_rf + y_sku_pred_lin) / 3
+metrics_ensemble_sku = evaluate_model("Ensemble (Average)", y_sku_test, y_sku_pred_ensemble)
+
+# Select best model
+best_model_sku = min([metrics_xgb_sku, metrics_rf_sku, metrics_lin_sku, metrics_ensemble_sku],
+                     key=lambda x: x['mae'])
+print(f"\n*** BEST SKU MODEL: {best_model_sku['name']} ***")
 
 # =============================================================================
-# PART 3: SKU-LEVEL FUTURE DEMAND FORECAST (NEXT 180 DAYS)
-#       + SEASONAL FORECAST (PRODUCT DEMAND)
+# PART 3: FUTURE FORECASTING WITH BEST MODEL
 # =============================================================================
-
 print("\n" + "=" * 100)
-print("PART 3: SKU-LEVEL FUTURE DEMAND FORECAST (NEXT 180 DAYS)")
+print("PART 3: SKU-LEVEL FUTURE DEMAND FORECAST (NEXT 6 MONTHS)")
 print("=" * 100)
 
 last_date_sku = demand_df['date'].max()
-forecast_horizon_days = 180
+forecast_horizon_months = 6
 
-# 3.1 Create future dates with time features (vectorized)
 future_dates = pd.date_range(
-    start=last_date_sku + timedelta(days=1),
-    periods=forecast_horizon_days,
-    freq='D'
+    start=last_date_sku + pd.offsets.MonthBegin(1),
+    periods=forecast_horizon_months,
+    freq='MS'
 )
 
-future_dates_df = pd.DataFrame({'date': future_dates})
-future_dates_df['month'] = future_dates_df['date'].dt.month
-future_dates_df['day_of_week'] = future_dates_df['date'].dt.dayofweek
-future_dates_df['day_of_year'] = future_dates_df['date'].dt.dayofyear
-future_dates_df['week_of_year'] = future_dates_df['date'].dt.isocalendar().week.astype(int)
-future_dates_df['quarter'] = future_dates_df['month'].apply(lambda m: (m - 1) // 3 + 1)
-future_dates_df['is_weekend'] = future_dates_df['day_of_week'].isin([5, 6]).astype(int)
-
-future_dates_df['month_sin'] = np.sin(2 * np.pi * future_dates_df['month'] / 12)
-future_dates_df['month_cos'] = np.cos(2 * np.pi * future_dates_df['month'] / 12)
-future_dates_df['dow_sin'] = np.sin(2 * np.pi * future_dates_df['day_of_week'] / 7)
-future_dates_df['dow_cos'] = np.cos(2 * np.pi * future_dates_df['day_of_week'] / 7)
-
-future_dates_df['global_trend'] = (future_dates_df['date'] - min_date).dt.days
-
-# Map month -> season (if mapping exists)
-if month_to_season:
-    future_dates_df['season'] = future_dates_df['month'].map(
-        lambda m: month_to_season.get(m, "Unknown")
-    )
-else:
-    future_dates_df['season'] = np.nan
-
-# 3.2 Get last known product-level features per SKU (vectorized)
+# Prepare future features with lags
 last_product_info = (
     demand_df.sort_values('date')
              .groupby('product_id')
-             .agg(
-                 product_code=('product_code', 'last'),
-                 category_code=('category_code', 'last'),
-                 avg_original_price=('avg_original_price', 'last'),
-                 avg_current_price=('avg_current_price', 'last'),
-                 avg_markdown=('avg_markdown', 'last'),
-                 avg_stock=('avg_stock', 'last'),
-                 avg_rating=('avg_rating', 'last')
-             )
-             .reset_index()
+             .tail(3)  # Get last 3 months for lag calculation
 )
 
-# 3.3 Cross-join dates x products using a key column
-future_dates_df['key'] = 1
-last_product_info['key'] = 1
+future_rows = []
+for date in future_dates:
+    month = date.month
+    for product in demand_df['product_id'].unique():
+        product_data = last_product_info[last_product_info['product_id'] == product]
+        if len(product_data) > 0:
+            last_row = product_data.iloc[-1]
+            
+            # Calculate lags from recent history
+            recent_sales = product_data['daily_sales'].values
+            lag_1 = recent_sales[-1] if len(recent_sales) >= 1 else 0
+            lag_2 = recent_sales[-2] if len(recent_sales) >= 2 else 0
+            lag_3 = recent_sales[-3] if len(recent_sales) >= 3 else 0
+            rolling_mean = np.mean(recent_sales) if len(recent_sales) > 0 else 0
+            rolling_std = np.std(recent_sales) if len(recent_sales) > 0 else 0
+            
+            future_rows.append({
+                'date': date,
+                'product_id': product,
+                'product_code': last_row['product_code'],
+                'category_code': last_row['category_code'],
+                'abc_code': last_row['abc_code'],
+                'avg_original_price': last_row['avg_original_price'],
+                'avg_current_price': last_row['avg_current_price'],
+                'avg_markdown': last_row['avg_markdown'],
+                'avg_stock': last_row['avg_stock'],
+                'avg_rating': last_row['avg_rating'],
+                'month': month,
+                'day_of_week': date.dayofweek,
+                'day_of_year': date.dayofyear,
+                'week_of_year': date.isocalendar().week,
+                'quarter': (month - 1) // 3 + 1,
+                'is_weekend': 1 if date.dayofweek in [5, 6] else 0,
+                'month_sin': np.sin(2 * np.pi * month / 12),
+                'month_cos': np.cos(2 * np.pi * month / 12),
+                'dow_sin': np.sin(2 * np.pi * date.dayofweek / 7),
+                'dow_cos': np.cos(2 * np.pi * date.dayofweek / 7),
+                'global_trend': (date - min_date).days,
+                'lag_1_month': lag_1,
+                'lag_2_month': lag_2,
+                'lag_3_month': lag_3,
+                'rolling_mean_3m': rolling_mean,
+                'rolling_std_3m': rolling_std,
+                'season': month_to_season[month],
+                'category': last_row['category'],
+                'abc_category': last_row['abc_category']
+            })
 
-future_df = future_dates_df.merge(last_product_info, on='key', how='outer').drop(columns='key')
-
-# 3.4 Predict SKU-level demand for all date–product pairs
+future_df = pd.DataFrame(future_rows)
 X_sku_future = future_df[sku_feature_cols]
-future_df['predicted_demand'] = xgb_sku_model.predict(X_sku_future)
 
-# 3.5 Aggregate to product-level totals
+# Use best model for predictions
+if best_model_sku['name'] == 'Linear Regression (PRIMARY)':
+    X_sku_future_scaled = scaler_sku.transform(X_sku_future)
+    future_df['predicted_demand'] = lin_sku_model.predict(X_sku_future_scaled)
+elif best_model_sku['name'] == 'Ensemble (Average)':
+    X_sku_future_scaled = scaler_sku.transform(X_sku_future)
+    pred_xgb = xgb_sku_model.predict(X_sku_future)
+    pred_rf = rf_sku_model.predict(X_sku_future)
+    pred_lin = lin_sku_model.predict(X_sku_future_scaled)
+    future_df['predicted_demand'] = (pred_xgb + pred_rf + pred_lin) / 3
+else:
+    future_df['predicted_demand'] = (xgb_sku_model if 'XGBoost' in best_model_sku['name'] 
+                                     else rf_sku_model).predict(X_sku_future)
+
+# Aggregate forecasts
 product_forecast = (
-    future_df.groupby('product_id')
+    future_df.groupby(['product_id', 'abc_category', 'category'])
              .agg(
                  total_forecast_demand=('predicted_demand', 'sum'),
-                 avg_daily_demand=('predicted_demand', 'mean'),
-                 first_category_code=('category_code', 'first')
+                 avg_monthly_demand=('predicted_demand', 'mean')
              )
              .reset_index()
+             .sort_values('total_forecast_demand', ascending=False)
 )
-
-product_forecast['category'] = product_forecast['first_category_code'].apply(
-    lambda c: category_unique[c] if 0 <= c < len(category_unique) else "Unknown"
-)
-product_forecast = product_forecast.sort_values('total_forecast_demand', ascending=False)
 
 top_n = 10
 top_products_forecast = product_forecast.head(top_n)
 
-print(f"\nTOP {top_n} PREDICTED IN-DEMAND PRODUCTS (NEXT {forecast_horizon_days} DAYS):")
+print(f"\nTOP {top_n} PREDICTED IN-DEMAND PRODUCTS (NEXT {forecast_horizon_months} MONTHS):")
 print("-" * 100)
 for _, row in top_products_forecast.iterrows():
-    print(f"{row['product_id']:>10s} | {row['category']:<15s} | "
-          f"Total Demand: {row['total_forecast_demand']:.2f} | "
-          f"Avg Daily: {row['avg_daily_demand']:.2f}")
+    print(f"{row['product_id']:>10s} | {row['abc_category']:>3s} | "
+          f"{row['category']:<15s} | Total: ${row['total_forecast_demand']:>8.2f} | "
+          f"Avg Monthly: ${row['avg_monthly_demand']:>6.2f}")
 
-# 3.6 Seasonal forecast of product demand (next 6 months)
-future_season_df = future_df.copy()
-
-# Make sure rows are ordered by date
-future_season_df = future_season_df.sort_values('date').reset_index(drop=True)
-
-# Horizon index: 1..forecast_horizon_days (one per forecast day)
-future_season_df["horizon_day"] = (
-    (future_season_df["date"] - future_season_df["date"].min()).dt.days + 1
-)
-
-# Assign reporting seasons based on position in the 180-day horizon
-half_horizon = forecast_horizon_days // 2  # 90 if horizon is 180
-future_season_df["season"] = np.where(
-    future_season_df["horizon_day"] <= half_horizon, "Fall", "Winter"
-)
-
-# Aggregate forecasted demand by these reporting seasons
+# Seasonal forecast
 seasonal_forecast = (
-    future_season_df.groupby("season")["predicted_demand"]
-    .sum()
-    .reset_index()
-    .rename(columns={"predicted_demand": "total_forecast_demand"})
-    .sort_values("total_forecast_demand", ascending=False)
-)
-
-print(f"\nFORECASTED PRODUCT DEMAND BY SEASON (NEXT {forecast_horizon_days} DAYS):")
-print("-" * 100)
-print(seasonal_forecast.to_string(index=False))
-
-# =============================================================================
-# PART 4: WEEKLY CATEGORY-LEVEL DATASET & MODELING
-# =============================================================================
-
-print("\n" + "=" * 100)
-print("PART 4: WEEKLY CATEGORY-LEVEL DATASET & MODELING")
-print("=" * 100)
-
-# Build daily category dataset from demand_df
-cat_daily_df = (
-    demand_df.groupby(['date', 'category'])
-             .agg(daily_sales=('daily_sales', 'sum'))
+    future_df.groupby('season')['predicted_demand']
+             .sum()
              .reset_index()
+             .rename(columns={'predicted_demand': 'total_forecast_demand'})
+             .sort_values('total_forecast_demand', ascending=False)
 )
 
-cat_daily_df['category_code'], category_codes_unique = pd.factorize(cat_daily_df['category'])
-cat_codes = cat_daily_df[['category', 'category_code']].drop_duplicates()
-
-# Weekly aggregation
-cat_weekly_df = (
-    cat_daily_df
-      .set_index('date')
-      .groupby('category')['daily_sales']
-      .resample('W-MON')
-      .sum()
-      .reset_index()
-      .rename(columns={'daily_sales': 'weekly_sales'})
-)
-
-cat_weekly_df = cat_weekly_df.merge(cat_codes, on='category', how='left')
-
-# Weekly time features
-cat_weekly_df['year'] = cat_weekly_df['date'].dt.year
-cat_weekly_df['week_of_year'] = cat_weekly_df['date'].dt.isocalendar().week.astype(int)
-cat_weekly_df['month'] = cat_weekly_df['date'].dt.month
-cat_weekly_df['quarter'] = cat_weekly_df['date'].dt.quarter
-cat_weekly_df['week_of_year_sin'] = np.sin(2 * np.pi * cat_weekly_df['week_of_year'] / 52)
-cat_weekly_df['week_of_year_cos'] = np.cos(2 * np.pi * cat_weekly_df['week_of_year'] / 52)
-cat_weekly_df['global_trend'] = (cat_weekly_df['date'] - min_date).dt.days
-
-weekly_target_col = 'weekly_sales'
-weekly_feature_cols = [
-    'category_code',
-    'year', 'month', 'week_of_year', 'quarter',
-    'week_of_year_sin', 'week_of_year_cos',
-    'global_trend'
-]
-
-cat_weekly_df = cat_weekly_df.sort_values('date').reset_index(drop=True)
-X_week = cat_weekly_df[weekly_feature_cols]
-y_week = cat_weekly_df[weekly_target_col]
-dates_week = cat_weekly_df['date']
-
-split_idx_week = int(len(cat_weekly_df) * 0.8)
-X_week_train, X_week_test = X_week.iloc[:split_idx_week], X_week.iloc[split_idx_week:]
-y_week_train, y_week_test = y_week.iloc[:split_idx_week], y_week.iloc[split_idx_week:]
-dates_week_train, dates_week_test = dates_week.iloc[:split_idx_week], dates_week.iloc[split_idx_week:]
-
-print(f"\nTraining Period (CATEGORY WEEKLY): {dates_week_train.min().strftime('%Y-%m-%d')} "
-      f"to {dates_week_train.max().strftime('%Y-%m-%d')}")
-print(f"Testing Period  (CATEGORY WEEKLY): {dates_week_test.min().strftime('%Y-%m-%d')} "
-      f"to {dates_week_test.max().strftime('%Y-%m-%d')}")
-print(f"Train samples (CATEGORY WEEKLY): {len(X_week_train):,}, "
-      f"Test samples (CATEGORY WEEKLY): {len(X_week_test):,}")
-
-scaler_week = StandardScaler()
-X_week_train_scaled = scaler_week.fit_transform(X_week_train)
-X_week_test_scaled = scaler_week.transform(X_week_test)
-
-print("\nTraining XGBoost Regressor (MAIN MODEL, CATEGORY WEEKLY)...")
-xgb_cat_week_model = XGBRegressor(
-    n_estimators=300,
-    learning_rate=0.05,
-    max_depth=6,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    objective='reg:squarederror',
-    random_state=42,
-    n_jobs=-1
-)
-xgb_cat_week_model.fit(X_week_train, y_week_train)
-
-print("Training Random Forest Regressor (BENCHMARK 1, CATEGORY WEEKLY)...")
-rf_cat_week_model = RandomForestRegressor(
-    n_estimators=200,
-    max_depth=None,
-    min_samples_split=5,
-    min_samples_leaf=2,
-    random_state=42,
-    n_jobs=-1
-)
-rf_cat_week_model.fit(X_week_train, y_week_train)
-
-print("Training Linear Regression (BENCHMARK 2, CATEGORY WEEKLY)...")
-lin_cat_week_model = LinearRegression()
-lin_cat_week_model.fit(X_week_train_scaled, y_week_train)
-
-
-def compute_wape(y_true, y_pred):
-    return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8) * 100
-
-
-def evaluate_weekly_model(name, y_true, y_pred):
-    mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mape = np.mean(np.abs((y_true - y_pred) / (y_true + 1))) * 100
-    wape = compute_wape(y_true, y_pred)
-    print(f"\n{name}")
-    print("-" * 60)
-    print(f"MAE:   {mae:.4f}")
-    print(f"RMSE:  {rmse:.4f}")
-    print(f"MAPE:  {mape:.2f}%")
-    print(f"WAPE:  {wape:.2f}%")
-    return {'name': name, 'mae': mae, 'rmse': rmse, 'mape': mape, 'wape': wape}
-
-
-print("\n" + "=" * 100)
-print("CATEGORY-LEVEL MODEL EVALUATION (WEEKLY)")
-print("=" * 100)
-
-y_week_pred_xgb = xgb_cat_week_model.predict(X_week_test)
-y_week_pred_rf = rf_cat_week_model.predict(X_week_test)
-y_week_pred_lin = lin_cat_week_model.predict(X_week_test_scaled)
-
-metrics_xgb_week = evaluate_weekly_model(
-    "XGBoost (MAIN MODEL, CATEGORY WEEKLY)", y_week_test, y_week_pred_xgb
-)
-metrics_rf_week = evaluate_weekly_model(
-    "Random Forest (BENCHMARK 1, CATEGORY WEEKLY)", y_week_test, y_week_pred_rf
-)
-metrics_lin_week = evaluate_weekly_model(
-    "Linear Regression (BENCHMARK 2, CATEGORY WEEKLY)", y_week_test, y_week_pred_lin
-)
-
-# =============================================================================
-# PART 5: FUTURE WEEKLY CATEGORY FORECAST (NEXT 26 WEEKS)
-# =============================================================================
-
-print("\n" + "=" * 100)
-print("PART 5: FUTURE WEEKLY CATEGORY FORECAST (NEXT 26 WEEKS)")
-print("=" * 100)
-
-forecast_weeks = 26
-last_week_date = cat_weekly_df['date'].max()
-future_week_starts = pd.date_range(
-    start=last_week_date + pd.Timedelta(weeks=1),
-    periods=forecast_weeks,
-    freq='W-MON'
-)
-
-cat_week_list = cat_weekly_df[['category', 'category_code']].drop_duplicates()
-
-future_week_rows = []
-for d in future_week_starts:
-    year = d.year
-    month = d.month
-    week_of_year = d.isocalendar().week
-    quarter = (month - 1) // 3 + 1
-    week_sin = np.sin(2 * np.pi * week_of_year / 52)
-    week_cos = np.cos(2 * np.pi * week_of_year / 52)
-    global_trend = (d - min_date).days
-
-    for _, row in cat_week_list.iterrows():
-        cat_name = row['category']
-        cat_code = row['category_code']
-        future_week_rows.append({
-            'date': d,
-            'category': cat_name,
-            'category_code': cat_code,
-            'year': year,
-            'month': month,
-            'week_of_year': week_of_year,
-            'quarter': quarter,
-            'week_of_year_sin': week_sin,
-            'week_of_year_cos': week_cos,
-            'global_trend': global_trend
-        })
-
-future_week_df = pd.DataFrame(future_week_rows)
-X_week_future = future_week_df[weekly_feature_cols]
-future_week_df['predicted_weekly_demand'] = xgb_cat_week_model.predict(X_week_future)
-
-cat_forecast_weekly = (
-    future_week_df.groupby('category')
-                  .agg(
-                      total_forecast_demand=('predicted_weekly_demand', 'sum'),
-                      avg_weekly_demand=('predicted_weekly_demand', 'mean')
-                  )
-                  .reset_index()
-                  .sort_values('total_forecast_demand', ascending=False)
-)
-
-print(f"\nFORECASTED CATEGORY DEMAND (NEXT {forecast_weeks} WEEKS):")
+print(f"\nFORECASTED PRODUCT DEMAND BY SEASON (NEXT {forecast_horizon_months} MONTHS):")
 print("-" * 100)
-print(cat_forecast_weekly)
+print(seasonal_forecast)
+
+# Category forecast
+category_forecast = (
+    future_df.groupby('category')['predicted_demand']
+             .sum()
+             .reset_index()
+             .rename(columns={'predicted_demand': 'total_forecast_demand'})
+             .sort_values('total_forecast_demand', ascending=False)
+)
+
+print(f"\nFORECASTED DEMAND BY CATEGORY (NEXT {forecast_horizon_months} MONTHS):")
+print("-" * 100)
+print(category_forecast)
+
+# ABC forecast
+abc_forecast = (
+    future_df.groupby('abc_category')['predicted_demand']
+             .sum()
+             .reset_index()
+             .rename(columns={'predicted_demand': 'total_forecast_demand'})
+             .sort_values('total_forecast_demand', ascending=False)
+)
+
+print(f"\nFORECASTED DEMAND BY ABC CATEGORY (NEXT {forecast_horizon_months} MONTHS):")
+print("-" * 100)
+print(abc_forecast)
 
 # =============================================================================
-# PART 5.5: EXPORT TABLES FOR POWER BI
+# EXPORT ENHANCED RESULTS
 # =============================================================================
-
-# Create a subfolder for Power BI exports (beside this .py file)
 base_dir = os.path.dirname(__file__)
-export_dir = os.path.join(base_dir, "powerbi_exports")
+export_dir = os.path.join(base_dir, "powerbi_exports_enhanced")
 os.makedirs(export_dir, exist_ok=True)
 
-print("\nSaving Power BI export CSVs to:", export_dir)
-
-# 1) SKU-level daily demand (historical)
-#    One row per product per day
-sku_daily_path = os.path.join(export_dir, "sku_daily_demand.csv")
-demand_df.to_csv(sku_daily_path, index=False)
-print(" - Saved SKU daily demand to", sku_daily_path)
-
-# 2) Top 10 historical best-selling products (SKU)
-top_hist_path = os.path.join(export_dir, "top10_hist_products.csv")
-top_hist_products.to_csv(top_hist_path, index=False)
-print(" - Saved Top 10 historical products to", top_hist_path)
-
-# 3) Historical demand by category
-cat_hist_path = os.path.join(export_dir, "hist_category_demand.csv")
-cat_hist.to_csv(cat_hist_path, index=False)
-print(" - Saved historical category demand to", cat_hist_path)
-
-# 4) Historical product demand by season (if available)
-if not hist_season_demand.empty:
-    hist_season_path = os.path.join(export_dir, "hist_seasonal_demand.csv")
-    hist_season_demand.to_csv(hist_season_path, index=False)
-    print(" - Saved historical seasonal demand to", hist_season_path)
-
-# 5) Full SKU-level future forecast (next 180 days)
-#    One row per product per forecast date
-sku_future_path = os.path.join(export_dir, "sku_future_forecast_180d.csv")
-future_df.to_csv(sku_future_path, index=False)
-print(" - Saved SKU future forecast (180 days) to", sku_future_path)
-
-# 6) Top 10 forecasted in-demand products
-top_forecast_path = os.path.join(export_dir, "top10_sku_future_forecast.csv")
-top_products_forecast.to_csv(top_forecast_path, index=False)
-print(" - Saved Top 10 future in-demand products to", top_forecast_path)
-
-# 7) Weekly category-level historical data
-cat_weekly_hist_path = os.path.join(export_dir, "category_weekly_hist_demand.csv")
-cat_weekly_df.to_csv(cat_weekly_hist_path, index=False)
-print(" - Saved weekly category historical demand to", cat_weekly_hist_path)
-
-# 8) Weekly category-level future forecast (next 26 weeks)
-cat_weekly_future_path = os.path.join(export_dir, "category_weekly_future_forecast_26w.csv")
-future_week_df.to_csv(cat_weekly_future_path, index=False)
-print(" - Saved weekly category future forecast (26 weeks) to", cat_weekly_future_path)
-
-# 9) Aggregated category forecast (total over next 26 weeks)
-cat_forecast_totals_path = os.path.join(export_dir, "category_forecast_totals_26w.csv")
-cat_forecast_weekly.to_csv(cat_forecast_totals_path, index=False)
-print(" - Saved category forecast totals to", cat_forecast_totals_path)
-
-# 10) Seasonal forecast for product demand (next 180 days)
-if not seasonal_forecast.empty:
-    seasonal_forecast_path = os.path.join(export_dir, "seasonal_forecast_180d.csv")
-    seasonal_forecast.to_csv(seasonal_forecast_path, index=False)
-    print(" - Saved seasonal product forecast to", seasonal_forecast_path)
-
-# 11) Model metrics table (SKU + weekly category)
-# metrics_xxx_* are dicts created earlier in the script
-metrics_rows = [
-    ["XGBoost_SKU_Daily",          metrics_xgb_sku["mae"],  metrics_xgb_sku["rmse"],  metrics_xgb_sku["mape"],  None],
-    ["RandomForest_SKU_Daily",     metrics_rf_sku["mae"],   metrics_rf_sku["rmse"],   metrics_rf_sku["mape"],   None],
-    ["LinearReg_SKU_Daily",        metrics_lin_sku["mae"],  metrics_lin_sku["rmse"],  metrics_lin_sku["mape"],  None],
-    ["XGBoost_Category_Weekly",    metrics_xgb_week["mae"], metrics_xgb_week["rmse"], metrics_xgb_week["mape"], metrics_xgb_week["wape"]],
-    ["RandomForest_Category_Weekly", metrics_rf_week["mae"], metrics_rf_week["rmse"], metrics_rf_week["mape"], metrics_rf_week["wape"]],
-    ["LinearReg_Category_Weekly",  metrics_lin_week["mae"], metrics_lin_week["rmse"], metrics_lin_week["mape"], metrics_lin_week["wape"]],
-]
-
-metrics_df = pd.DataFrame(
-    metrics_rows,
-    columns=["model", "mae", "rmse", "mape", "wape"]
-)
-
-metrics_path = os.path.join(export_dir, "model_metrics.csv")
-metrics_df.to_csv(metrics_path, index=False)
-print(" - Saved model metrics to", metrics_path)
-
-# =============================================================================
-# PART 6: VISUALIZATIONS (SEPARATE FIGURES)
-# =============================================================================
-
 print("\n" + "=" * 100)
-print("PART 6: VISUALIZATIONS (SEPARATE CHARTS)")
+print("EXPORTING ENHANCED RESULTS")
 print("=" * 100)
+print(f"Saving to: {export_dir}")
 
-base_dir = os.path.dirname(__file__)
+# Export key tables
+demand_df.to_csv(os.path.join(export_dir, "sku_monthly_demand_enhanced.csv"), index=False)
+top_hist_products.to_csv(os.path.join(export_dir, "top10_hist_products.csv"), index=False)
+product_forecast.to_csv(os.path.join(export_dir, "sku_future_forecast_6months.csv"), index=False)
+future_df.to_csv(os.path.join(export_dir, "detailed_future_forecast.csv"), index=False)
+seasonal_forecast.to_csv(os.path.join(export_dir, "seasonal_forecast.csv"), index=False)
+category_forecast.to_csv(os.path.join(export_dir, "category_forecast.csv"), index=False)
+abc_forecast.to_csv(os.path.join(export_dir, "abc_forecast.csv"), index=False)
 
-# 1) Top 10 Historical Best-Selling Products (SKU) – horizontal bar
-fig1, ax1 = plt.subplots(figsize=(10, 6))
-top_hist_plot = top_hist_products.sort_values('total_hist_demand', ascending=True)
-ax1.barh(top_hist_plot['product_id'], top_hist_plot['total_hist_demand'])
-ax1.set_title(f"Top {top_hist_n} Historical Best-Selling Products (SKU)")
-ax1.set_xlabel("Total Historical Demand")
-ax1.set_ylabel("Product ID")
-ax1.grid(axis='x', alpha=0.3)
-plt.tight_layout()
-out1 = os.path.join(base_dir, "viz1_top_hist_sku.png")
-plt.savefig(out1, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out1}")
+# Model comparison
+model_comparison = pd.DataFrame([
+    metrics_xgb_sku,
+    metrics_rf_sku,
+    metrics_lin_sku,
+    metrics_ensemble_sku
+])
+model_comparison.to_csv(os.path.join(export_dir, "model_comparison.csv"), index=False)
 
-# 2) Historical Demand by Category – vertical bar
-fig2, ax2 = plt.subplots(figsize=(10, 6))
-cat_hist_plot = cat_hist.sort_values('total_hist_demand', ascending=False)
-ax2.bar(cat_hist_plot['category'], cat_hist_plot['total_hist_demand'])
-ax2.set_title("Historical Demand by Category")
-ax2.set_xlabel("Category")
-ax2.set_ylabel("Total Historical Demand")
-ax2.tick_params(axis='x', rotation=45)
-ax2.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-out2 = os.path.join(base_dir, "viz2_hist_demand_by_category.png")
-plt.savefig(out2, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out2}")
-
-# 3) Top 10 Predicted In-Demand Products (Next 180 Days) – standard bar chart
-fig3, ax3 = plt.subplots(figsize=(10, 6))
-future_top_plot = top_products_forecast.sort_values('total_forecast_demand', ascending=False)
-ax3.bar(future_top_plot['product_id'], future_top_plot['total_forecast_demand'])
-ax3.set_title(f"Top {top_n} Forecasted In-Demand Products (Next {forecast_horizon_days} Days)")
-ax3.set_xlabel("Product ID")
-ax3.set_ylabel("Forecast Total Demand")
-ax3.tick_params(axis='x', rotation=45)
-ax3.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-out3 = os.path.join(base_dir, "viz3_top_forecast_sku.png")
-plt.savefig(out3, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out3}")
-
-# 4A) Forecasted Weekly Demand by Category (Next 26 Weeks) – COMBINED MULTI-LINE
-weekly_pivot = future_week_df.pivot_table(
-    index='date',
-    columns='category',
-    values='predicted_weekly_demand',
-    aggfunc='sum'
-).sort_index()
-
-fig4a, ax4a = plt.subplots(figsize=(10, 6))
-for cat in weekly_pivot.columns:
-    ax4a.plot(weekly_pivot.index, weekly_pivot[cat], label=cat)
-
-ax4a.set_title(f"Forecasted Weekly Demand by Category (Next {forecast_weeks} Weeks) – Combined")
-ax4a.set_xlabel("Week (Date)")
-ax4a.set_ylabel("Weekly Demand")
-ax4a.grid(axis='y', alpha=0.3)
-ax4a.legend(loc='center left', bbox_to_anchor=(1, 0.5), title="Category")
-plt.tight_layout()
-out4a = os.path.join(base_dir, "viz4a_weekly_forecast_category_combined.png")
-plt.savefig(out4a, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out4a}")
-
-# 4B) Forecasted Weekly Demand by Category (Next 26 Weeks) – SMALL MULTIPLES
-categories = weekly_pivot.columns.tolist()
-n_cats = len(categories)
-
-rows, cols = 3, 2  # for 6 categories
-fig4b, axes = plt.subplots(rows, cols, figsize=(12, 8), sharex=True, sharey=True)
-
-for ax, cat in zip(axes.flatten(), categories):
-    ax.plot(weekly_pivot.index, weekly_pivot[cat])
-    ax.set_title(cat)
-    ax.grid(axis='y', alpha=0.3)
-
-# Hide any unused subplots
-for ax in axes.flatten()[n_cats:]:
-    ax.axis('off')
-
-fig4b.suptitle(f"Forecasted Weekly Demand by Category (Next {forecast_weeks} Weeks)", y=0.95)
-for ax in axes[-1, :]:
-    ax.set_xlabel("Week (Date)")
-axes[0, 0].set_ylabel("Weekly Demand")
-
-plt.tight_layout(rect=[0, 0, 1, 0.95])
-out4b = os.path.join(base_dir, "viz4b_weekly_forecast_category_small_multiples.png")
-plt.savefig(out4b, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out4b}")
-
-# 5) Historical Average Weekly Demand by Category – vertical bar
-fig5, ax5 = plt.subplots(figsize=(10, 6))
-cat_weekly_avg = (
-    cat_weekly_df.groupby('category')['weekly_sales']
-                 .mean()
-                 .reset_index()
-                 .rename(columns={'weekly_sales': 'avg_weekly_sales'})
-                 .sort_values('avg_weekly_sales', ascending=False)
-)
-ax5.bar(cat_weekly_avg['category'], cat_weekly_avg['avg_weekly_sales'])
-ax5.set_title("Historical Average Weekly Demand by Category")
-ax5.set_xlabel("Category")
-ax5.set_ylabel("Average Weekly Demand")
-ax5.tick_params(axis='x', rotation=45)
-ax5.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-out5 = os.path.join(base_dir, "viz5_hist_avg_weekly_category.png")
-plt.savefig(out5, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out5}")
-
-# 6) Historical Product Demand by Season – line graph
-fig6, ax6 = plt.subplots(figsize=(8, 5))
-hist_season_plot = hist_season_demand.copy()
-if not hist_season_plot.empty:
-    x_idx = np.arange(len(hist_season_plot))
-    ax6.plot(x_idx, hist_season_plot['total_hist_demand'], marker='o')
-    ax6.set_xticks(x_idx)
-    ax6.set_xticklabels(hist_season_plot['season'])
-    ax6.set_title("Historical Product Demand by Season")
-    ax6.set_xlabel("Season")
-    ax6.set_ylabel("Total Historical Demand")
-    ax6.grid(axis='y', alpha=0.3)
-else:
-    ax6.text(0.5, 0.5, "No season data available", ha='center', va='center')
-plt.tight_layout()
-out6 = os.path.join(base_dir, "viz6_hist_demand_by_season.png")
-plt.savefig(out6, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out6}")
-
-# 7) Forecasted Product Demand by Season (Next 180 Days) – line graph, no scientific notation
-fig7, ax7 = plt.subplots(figsize=(8, 5))
-seasonal_forecast_plot = seasonal_forecast.copy()
-if not seasonal_forecast_plot.empty:
-    x_idx2 = np.arange(len(seasonal_forecast_plot))
-    ax7.plot(x_idx2, seasonal_forecast_plot['total_forecast_demand'], marker='o')
-    ax7.set_xticks(x_idx2)
-    ax7.set_xticklabels(seasonal_forecast_plot['season'])
-    ax7.set_title(f"Forecasted Product Demand by Season (Next {forecast_horizon_days} Days)")
-    ax7.set_xlabel("Season")
-    ax7.set_ylabel("Forecast Total Demand")
-
-    # Disable scientific notation, show full values
-    ax7.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
-
-    ax7.grid(axis='y', alpha=0.3)
-else:
-    ax7.text(0.5, 0.5, "No season forecast available", ha='center', va='center')
-plt.tight_layout()
-out7 = os.path.join(base_dir, "viz7_forecast_demand_by_season.png")
-plt.savefig(out7, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Saved: {out7}")
+print("✓ All enhanced exports saved")
 
 # =============================================================================
 # SUMMARY
 # =============================================================================
-
 print("\n" + "=" * 100)
-print("FORECASTING SUMMARY")
+print("ENHANCED FORECASTING SUMMARY")
 print("=" * 100)
 
-def short_sku_summary(m):
-    return f"MAE={m['mae']:.2f}, RMSE={m['rmse']:.2f}, MAPE={m['mape']:.1f}%"
+print(f"\nBest Model: {best_model_sku['name']}")
+print(f"  MAE:  {best_model_sku['mae']:.2f}")
+print(f"  RMSE: {best_model_sku['rmse']:.2f}")
+print(f"  MASE: {best_model_sku['mase']:.3f}")
+print(f"  MAPE: {best_model_sku['mape']:.2f}%")
 
-def short_week_summary(m):
-    return (f"MAE={m['mae']:.2f}, RMSE={m['rmse']:.2f}, "
-            f"MAPE={m['mape']:.1f}%, WAPE={m['wape']:.1f}%")
+print(f"\nTop Product (Next 6 Months): {top_products_forecast.iloc[0]['product_id']}")
+print(f"  Category: {top_products_forecast.iloc[0]['category']}")
+print(f"  ABC Class: {top_products_forecast.iloc[0]['abc_category']}")
+print(f"  Forecast: ${top_products_forecast.iloc[0]['total_forecast_demand']:.2f}")
 
-print("\nSKU-LEVEL MODELS (DAILY):")
-print(f"MAIN MODEL (XGBoost):       {short_sku_summary(metrics_xgb_sku)}")
-print(f"BENCHMARK 1 (RandomForest): {short_sku_summary(metrics_rf_sku)}")
-print(f"BENCHMARK 2 (LinearReg):    {short_sku_summary(metrics_lin_sku)}")
+print(f"\nTop Season: {seasonal_forecast.iloc[0]['season']} "
+      f"(${seasonal_forecast.iloc[0]['total_forecast_demand']:,.2f})")
 
-print("\nCATEGORY-LEVEL MODELS (WEEKLY):")
-print(f"MAIN MODEL (XGBoost):       {short_week_summary(metrics_xgb_week)}")
-print(f"BENCHMARK 1 (RandomForest): {short_week_summary(metrics_rf_week)}")
-print(f"BENCHMARK 2 (LinearReg):    {short_week_summary(metrics_lin_week)}")
+print(f"\nTop Category: {category_forecast.iloc[0]['category']} "
+      f"(${category_forecast.iloc[0]['total_forecast_demand']:,.2f})")
 
-print(f"\nTop product by forecasted demand (SKU): "
-      f"{top_products_forecast.iloc[0]['product_id']} "
-      f"({top_products_forecast.iloc[0]['category']}) with "
-      f"{top_products_forecast.iloc[0]['total_forecast_demand']:.2f} "
-      f"forecast demand over the next {forecast_horizon_days} days.")
+# =============================================================================
+# PART 4: ENHANCED VISUALIZATIONS
+# =============================================================================
+print("\n" + "=" * 100)
+print("PART 4: GENERATING ENHANCED VISUALIZATIONS")
+print("=" * 100)
 
-print(f"Top category by historical demand: "
-      f"{cat_hist_plot.iloc[0]['category']} with "
-      f"{cat_hist_plot.iloc[0]['total_hist_demand']:.2f} total sales.")
+# Set style
+plt.style.use('seaborn-v0_8-darkgrid')
+colors = plt.cm.Set3(np.linspace(0, 1, 10))
 
-print(f"Top category by forecasted weekly demand (next {forecast_weeks} weeks): "
-      f"{cat_forecast_weekly.iloc[0]['category']} with "
-      f"{cat_forecast_weekly.iloc[0]['total_forecast_demand']:.2f} forecast demand.")
+fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
+fig1.suptitle('Model Performance Comparison - SKU Level', fontsize=16, fontweight='bold')
 
-if not seasonal_forecast.empty:
-    print(f"\nTop season by forecasted product demand (next {forecast_horizon_days} days): "
-          f"{seasonal_forecast.iloc[0]['season']} with "
-          f"{seasonal_forecast.iloc[0]['total_forecast_demand']:.2f} total forecast demand.")
+metrics_data = [metrics_xgb_sku, metrics_rf_sku, metrics_lin_sku, metrics_ensemble_sku]
+model_names = ['XGBoost\n(Enhanced)', 'Random\nForest', 'Linear\nRegression', 'Ensemble']
+
+# MAE
+axes1[0, 0].bar(model_names, [m['mae'] for m in metrics_data], color=colors[:4])
+axes1[0, 0].set_title('Mean Absolute Error (MAE)', fontweight='bold')
+axes1[0, 0].set_ylabel('MAE')
+axes1[0, 0].grid(axis='y', alpha=0.3)
+
+# RMSE
+axes1[0, 1].bar(model_names, [m['rmse'] for m in metrics_data], color=colors[:4])
+axes1[0, 1].set_title('Root Mean Squared Error (RMSE)', fontweight='bold')
+axes1[0, 1].set_ylabel('RMSE')
+axes1[0, 1].grid(axis='y', alpha=0.3)
+
+# MASE
+axes1[0, 2].bar(model_names, [m['mase'] for m in metrics_data], color=colors[:4])
+axes1[0, 2].set_title('Mean Absolute Scaled Error (MASE)', fontweight='bold')
+axes1[0, 2].set_ylabel('MASE')
+axes1[0, 2].axhline(y=1, color='r', linestyle='--', label='Naive Forecast')
+axes1[0, 2].legend()
+axes1[0, 2].grid(axis='y', alpha=0.3)
+
+# MAPE (NEW)
+axes1[1, 1].bar(model_names, [m['mape'] for m in metrics_data], color=colors[:4])
+axes1[1, 1].set_title('Mean Absolute Percentage Error (MAPE)', fontweight='bold')
+axes1[1, 1].set_ylabel('MAPE (%)')
+axes1[1, 1].grid(axis='y', alpha=0.3)
+
+# Hide the last subplot
+axes1[1, 2].axis('off')
+
+plt.tight_layout()
+out1 = os.path.join(base_dir, "enhanced_viz1_model_comparison.png")
+plt.savefig(out1, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out1}")
+# 2) ABC Analysis Visualization
+fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
+fig2.suptitle('ABC Analysis - Product Classification', fontsize=16, fontweight='bold')
+
+# Products by ABC
+abc_counts = abc_summary.set_index('abc_category')['product_id']
+axes2[0].pie(abc_counts, labels=abc_counts.index, autopct='%1.1f%%', 
+             colors=['#ff9999', '#66b3ff', '#99ff99'], startangle=90)
+axes2[0].set_title('Product Distribution by ABC Category', fontweight='bold')
+
+# Sales by ABC
+abc_sales = abc_summary.set_index('abc_category')['total_sales']
+axes2[1].bar(abc_sales.index, abc_sales.values, color=['#ff9999', '#66b3ff', '#99ff99'])
+axes2[1].set_title('Sales Distribution by ABC Category', fontweight='bold')
+axes2[1].set_ylabel('Total Sales ($)')
+axes2[1].yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+axes2[1].grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+out2 = os.path.join(base_dir, "enhanced_viz2_abc_analysis.png")
+plt.savefig(out2, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out2}")
+
+# 3) Top 10 Historical vs Forecasted Products
+fig3, ax3 = plt.subplots(figsize=(12, 8))
+
+top_hist_ids = top_hist_products['product_id'].values
+top_forecast_matched = product_forecast[product_forecast['product_id'].isin(top_hist_ids)].set_index('product_id')
+top_hist_matched = top_hist_products.set_index('product_id')
+
+x = np.arange(len(top_hist_ids))
+width = 0.35
+
+bars1 = ax3.bar(x - width/2, [top_hist_matched.loc[pid, 'total_hist_demand'] for pid in top_hist_ids],
+                width, label='Historical', color='steelblue', alpha=0.8)
+bars2 = ax3.bar(x + width/2, [top_forecast_matched.loc[pid, 'total_forecast_demand'] 
+                               if pid in top_forecast_matched.index else 0 for pid in top_hist_ids],
+                width, label='Forecast (6mo)', color='coral', alpha=0.8)
+
+ax3.set_xlabel('Product ID', fontweight='bold')
+ax3.set_ylabel('Demand ($)', fontweight='bold')
+ax3.set_title('Top 10 Historical Products: Historical vs Forecasted Demand', fontsize=14, fontweight='bold')
+ax3.set_xticks(x)
+ax3.set_xticklabels(top_hist_ids, rotation=45, ha='right')
+ax3.legend()
+ax3.grid(axis='y', alpha=0.3)
+ax3.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+
+plt.tight_layout()
+out3 = os.path.join(base_dir, "enhanced_viz3_hist_vs_forecast.png")
+plt.savefig(out3, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out3}")
+
+# 4) Category Forecast Breakdown
+fig4, axes4 = plt.subplots(1, 2, figsize=(14, 6))
+fig4.suptitle('Category Demand Forecast (Next 6 Months)', fontsize=16, fontweight='bold')
+
+# Bar chart
+axes4[0].barh(category_forecast['category'], category_forecast['total_forecast_demand'], 
+              color=colors[:len(category_forecast)])
+axes4[0].set_xlabel('Forecast Demand ($)', fontweight='bold')
+axes4[0].set_title('Total Forecast by Category', fontweight='bold')
+axes4[0].xaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+axes4[0].grid(axis='x', alpha=0.3)
+
+# Pie chart
+axes4[1].pie(category_forecast['total_forecast_demand'], 
+             labels=category_forecast['category'],
+             autopct='%1.1f%%', startangle=90, colors=colors[:len(category_forecast)])
+axes4[1].set_title('Forecast Share by Category', fontweight='bold')
+
+plt.tight_layout()
+out4 = os.path.join(base_dir, "enhanced_viz4_category_forecast.png")
+plt.savefig(out4, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out4}")
+
+# 5) Seasonal Forecast
+fig5, ax5 = plt.subplots(figsize=(10, 6))
+
+season_order = ['Spring', 'Summer', 'Fall', 'Winter']
+seasonal_forecast_sorted = seasonal_forecast.set_index('season').reindex(season_order).reset_index()
+seasonal_forecast_sorted = seasonal_forecast_sorted.dropna()
+
+bars = ax5.bar(seasonal_forecast_sorted['season'], 
+               seasonal_forecast_sorted['total_forecast_demand'],
+               color=['#90EE90', '#FFD700', '#FF8C00', '#87CEEB'])
+
+ax5.set_xlabel('Season', fontweight='bold')
+ax5.set_ylabel('Forecast Demand ($)', fontweight='bold')
+ax5.set_title('Seasonal Demand Forecast (Next 6 Months)', fontsize=14, fontweight='bold')
+ax5.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+ax5.grid(axis='y', alpha=0.3)
+
+# Add value labels on bars
+for bar in bars:
+    height = bar.get_height()
+    ax5.text(bar.get_x() + bar.get_width()/2., height,
+             f'${height:,.0f}', ha='center', va='bottom', fontweight='bold')
+
+plt.tight_layout()
+out5 = os.path.join(base_dir, "enhanced_viz5_seasonal_forecast.png")
+plt.savefig(out5, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out5}")
+
+# 6) ABC Forecast Breakdown
+fig6, axes6 = plt.subplots(1, 2, figsize=(14, 6))
+fig6.suptitle('ABC Category Forecast (Next 6 Months)', fontsize=16, fontweight='bold')
+
+abc_colors = {'A': '#ff9999', 'B': '#66b3ff', 'C': '#99ff99'}
+colors_abc = [abc_colors.get(cat, '#cccccc') for cat in abc_forecast['abc_category']]
+
+# Bar chart
+axes6[0].bar(abc_forecast['abc_category'], abc_forecast['total_forecast_demand'], 
+             color=colors_abc)
+axes6[0].set_xlabel('ABC Category', fontweight='bold')
+axes6[0].set_ylabel('Forecast Demand ($)', fontweight='bold')
+axes6[0].set_title('Total Forecast by ABC Category', fontweight='bold')
+axes6[0].yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+axes6[0].grid(axis='y', alpha=0.3)
+
+# Add percentage labels
+total_forecast = abc_forecast['total_forecast_demand'].sum()
+for i, (cat, val) in enumerate(zip(abc_forecast['abc_category'], abc_forecast['total_forecast_demand'])):
+    pct = (val / total_forecast) * 100
+    axes6[0].text(i, val, f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
+
+# Pie chart
+axes6[1].pie(abc_forecast['total_forecast_demand'], 
+             labels=abc_forecast['abc_category'],
+             autopct='%1.1f%%', startangle=90, colors=colors_abc)
+axes6[1].set_title('Forecast Share by ABC Category', fontweight='bold')
+
+plt.tight_layout()
+out6 = os.path.join(base_dir, "enhanced_viz6_abc_forecast.png")
+plt.savefig(out6, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out6}")
+
+# 7) Top 10 Forecast Products with ABC Labels
+fig7, ax7 = plt.subplots(figsize=(12, 8))
+
+top_10_forecast = product_forecast.head(10).copy()
+abc_colors_map = {'A': '#ff9999', 'B': '#66b3ff', 'C': '#99ff99'}
+bar_colors = [abc_colors_map.get(abc, '#cccccc') for abc in top_10_forecast['abc_category']]
+
+bars = ax7.barh(range(len(top_10_forecast)), top_10_forecast['total_forecast_demand'], 
+                color=bar_colors)
+
+ax7.set_yticks(range(len(top_10_forecast)))
+ax7.set_yticklabels([f"{row['product_id']}\n({row['abc_category']})" 
+                      for _, row in top_10_forecast.iterrows()])
+ax7.set_xlabel('Forecast Demand ($)', fontweight='bold')
+ax7.set_title('Top 10 Forecasted Products (Next 6 Months) - Color by ABC', 
+              fontsize=14, fontweight='bold')
+ax7.xaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+ax7.grid(axis='x', alpha=0.3)
+ax7.invert_yaxis()
+
+# Add legend
+from matplotlib.patches import Patch
+legend_elements = [Patch(facecolor='#ff9999', label='A - High Value'),
+                   Patch(facecolor='#66b3ff', label='B - Medium Value'),
+                   Patch(facecolor='#99ff99', label='C - Low Value')]
+ax7.legend(handles=legend_elements, loc='lower right')
+
+plt.tight_layout()
+out7 = os.path.join(base_dir, "enhanced_viz7_top10_forecast_abc.png")
+plt.savefig(out7, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out7}")
+
+# 8) Actual vs Predicted (Test Set) for Best Model
+fig8, ax8 = plt.subplots(figsize=(12, 8))
+
+# Sample 500 points for clarity
+sample_size = min(500, len(y_sku_test))
+sample_indices = np.random.choice(len(y_sku_test), sample_size, replace=False)
+
+if best_model_sku['name'] == 'Linear Regression (PRIMARY)':
+    y_pred_best = y_sku_pred_lin[sample_indices]
+elif best_model_sku['name'] == 'Ensemble (Average)':
+    y_pred_best = y_sku_pred_ensemble[sample_indices]
+elif 'XGBoost' in best_model_sku['name']:
+    y_pred_best = y_sku_pred_xgb[sample_indices]
+else:
+    y_pred_best = y_sku_pred_rf[sample_indices]
+
+y_test_sample = y_sku_test.values[sample_indices]
+
+ax8.scatter(y_test_sample, y_pred_best, alpha=0.5, s=30)
+ax8.plot([y_test_sample.min(), y_test_sample.max()], 
+         [y_test_sample.min(), y_test_sample.max()], 
+         'r--', lw=2, label='Perfect Prediction')
+
+ax8.set_xlabel('Actual Demand ($)', fontweight='bold')
+ax8.set_ylabel('Predicted Demand ($)', fontweight='bold')
+ax8.set_title(f'Actual vs Predicted - {best_model_sku["name"]} (Test Set Sample)', 
+              fontsize=14, fontweight='bold')
+ax8.legend()
+ax8.grid(alpha=0.3)
+
+# Add metrics text box
+textstr = f"MAE: ${best_model_sku['mae']:.2f}\nRMSE: ${best_model_sku['rmse']:.2f}\nMAPE: {best_model_sku['mape']:.2f}%"
+props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+ax8.text(0.05, 0.95, textstr, transform=ax8.transAxes, fontsize=11,
+         verticalalignment='top', bbox=props)
+plt.tight_layout()
+out8 = os.path.join(base_dir, "enhanced_viz8_actual_vs_predicted.png")
+plt.savefig(out8, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out8}")
+
+# 9) Monthly Forecast Trend by Category
+fig9, ax9 = plt.subplots(figsize=(14, 7))
+
+monthly_category = future_df.groupby(['date', 'category'])['predicted_demand'].sum().reset_index()
+
+for category in monthly_category['category'].unique():
+    cat_data = monthly_category[monthly_category['category'] == category]
+    ax9.plot(cat_data['date'], cat_data['predicted_demand'], 
+             marker='o', label=category, linewidth=2)
+
+ax9.set_xlabel('Month', fontweight='bold')
+ax9.set_ylabel('Forecast Demand ($)', fontweight='bold')
+ax9.set_title('Monthly Forecast Trend by Category (Next 6 Months)', 
+              fontsize=14, fontweight='bold')
+ax9.legend(loc='best')
+ax9.grid(alpha=0.3)
+ax9.yaxis.set_major_formatter(ticker.StrMethodFormatter('${x:,.0f}'))
+plt.xticks(rotation=45)
+
+plt.tight_layout()
+out9 = os.path.join(base_dir, "enhanced_viz9_monthly_category_trend.png")
+plt.savefig(out9, dpi=300, bbox_inches='tight')
+plt.show()
+print(f"✓ Saved: {out9}")
+
+# 10) Feature Importance (for tree-based models)
+if hasattr(xgb_sku_model, 'feature_importances_'):
+    fig10, ax10 = plt.subplots(figsize=(10, 8))
+    
+    feature_importance = pd.DataFrame({
+        'feature': sku_feature_cols,
+        'importance': xgb_sku_model.feature_importances_
+    }).sort_values('importance', ascending=True).tail(15)
+    
+    ax10.barh(feature_importance['feature'], feature_importance['importance'], 
+              color='steelblue')
+    ax10.set_xlabel('Importance', fontweight='bold')
+    ax10.set_title('Top 15 Feature Importance - Enhanced XGBoost Model', 
+                   fontsize=14, fontweight='bold')
+    ax10.grid(axis='x', alpha=0.3)
+    
+    plt.tight_layout()
+    out10 = os.path.join(base_dir, "enhanced_viz10_feature_importance.png")
+    plt.savefig(out10, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"✓ Saved: {out10}")
+
+print("\n✓ All visualizations generated successfully!")
 
 print("\n" + "=" * 100)
-print("SKU & CATEGORY DEMAND FORECASTING COMPLETE")
+print("ENHANCED FORECASTING COMPLETE")
 print("=" * 100)

@@ -1,0 +1,2 @@
+model_name,mae,rmse,mase,mape,is_best_model,model_type,key_strengths,use_case,rank
+Linear Regression,6.316129766312932,8.63014831513413,0.1154827412482508,1.1262276974597973,True,Linear Model,Interpretable coefficients; fast training; stable predictions; works well with scaled features,Primary model when demand follows linear trends and for easy business interpretation,1

@@ -66,7 +66,8 @@ df["purchase_date"] = pd.to_datetime(df["purchase_date"], errors="coerce")
 numeric_cols = [
     "original_price", "markdown_percentage", "current_price",
     "stock_quantity", "total_sales", "customer_rating",
-    "latitude", "longitude"
+    "latitude", "longitude",
+    "quantity_sold", "unit_cost", "profit_margin"
 ]
 for col in numeric_cols:
     if col in df.columns:
@@ -238,7 +239,10 @@ fact_product_sales = fact[[
     "discount_rate",
     "stock_quantity",
     "total_sales",
+    "quantity_sold",
     "revenue",
+    "unit_cost",
+    "profit_margin",
     "customer_rating",
     "is_returned",
     "return_reason"

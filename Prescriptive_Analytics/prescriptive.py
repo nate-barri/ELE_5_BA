@@ -46,7 +46,7 @@ def register_model(category, model_name, description):
 # NEW VERSION - Loading from Predictive_Analytics folder
 def load_data():
     """Load data from Predictive_Analytics folder"""
-    csv_file = "Predictive_Analytics/dataset_ele_5_cleaned_adjusted.csv"
+    csv_file = "../ETL/dataset_ele_5_cleaned_adjusted.csv"
     
     df = pd.read_csv(csv_file)
     df['purchase_date'] = pd.to_datetime(df['purchase_date'])
@@ -95,12 +95,16 @@ def compute_demand_statistics(df):
         'current_price': 'mean',
         'original_price': 'mean',
         'markdown_percentage': 'mean',
+        'unit_cost': 'mean',
+        'profit_margin': 'mean',
+        'stock_quantity': 'mean',
         'category': 'first',
         'brand': 'first'
     }).reset_index()
-    
-    product_demand.columns = ['product_id', 'total_revenue', 'mean_daily_revenue', 'std_daily_revenue', 
+
+    product_demand.columns = ['product_id', 'total_revenue', 'mean_daily_revenue', 'std_daily_revenue',
                                'num_transactions', 'avg_price', 'original_price', 'avg_markdown',
+                               'avg_unit_cost', 'avg_profit_margin', 'avg_stock_quantity',
                                'category', 'brand']
     
     # Calculate units sold (approximation)
@@ -151,9 +155,12 @@ def model_eoq(df, product_demand):
     register_model("Classical Inventory Models", "Economic Order Quantity (EOQ)",
                    "Determines optimal order quantity minimizing total inventory costs")
     
-    # Parameters
-    ordering_cost = 50  # Cost per order ($)
-    holding_cost_rate = 0.25  # 25% of item value per year
+    # Parameters (using dataset columns)
+    # Ordering cost estimated as 10% of average unit cost per order
+    ordering_cost_base = product_demand['avg_unit_cost'].mean()
+    ordering_cost = ordering_cost_base * 0.1  # 10% of unit cost as ordering cost per order
+    # Holding cost rate based on profit margin (conservative estimate)
+    holding_cost_rate = product_demand['avg_profit_margin'].mean() * 0.5  # 50% of profit margin
     lead_time_days = 7
     service_level = 0.95
     z_score = norm.ppf(service_level)
@@ -165,8 +172,8 @@ def model_eoq(df, product_demand):
     days_in_data = (df['purchase_date'].max() - df['purchase_date'].min()).days
     eoq_results['annual_demand'] = eoq_results['units_sold'] * (365 / max(days_in_data, 1))
     
-    # Holding cost per unit
-    eoq_results['holding_cost'] = eoq_results['avg_price'] * holding_cost_rate
+    # Holding cost per unit (product-specific using profit margin)
+    eoq_results['holding_cost'] = eoq_results['avg_price'] * (eoq_results['avg_profit_margin'] * 0.5)
     
     # EOQ Formula
     eoq_results['eoq'] = np.sqrt(
@@ -246,7 +253,7 @@ def model_eoq(df, product_demand):
     axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('Prescriptive_Analytics/model_eoq.png', dpi=300, bbox_inches='tight')
+    plt.savefig('model_eoq.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return eoq_results
@@ -278,14 +285,14 @@ def model_newsvendor(df, product_demand):
     register_model("Stochastic Models", "Newsvendor Model",
                    "Optimal order quantity for single-period inventory under demand uncertainty")
     
-    # Parameters
-    gross_margin = 0.40  # 40% margin
-    salvage_rate = 0.20  # Can recover 20% of cost for excess inventory
+    # Parameters (using dataset columns)
+    gross_margin = product_demand['avg_profit_margin'].mean()  # Use average profit margin from data
+    salvage_rate = min(0.5, product_demand['avg_markdown'].mean() / 100)  # Salvage rate based on markdown percentage
     
     newsvendor_results = product_demand.copy()
     
-    # Cost calculations
-    newsvendor_results['unit_cost'] = newsvendor_results['avg_price'] * (1 - gross_margin)
+    # Cost calculations (product-specific)
+    newsvendor_results['unit_cost'] = newsvendor_results['avg_unit_cost']  # Use actual unit cost from data
     newsvendor_results['underage_cost'] = newsvendor_results['avg_price'] - newsvendor_results['unit_cost']  # Cu = profit margin
     newsvendor_results['overage_cost'] = newsvendor_results['unit_cost'] * (1 - salvage_rate)  # Co = cost - salvage
     
@@ -474,11 +481,10 @@ def model_mip_assortment(df, product_demand, category_demand):
     # Prepare data for MIP
     mip_data = product_demand.copy()
     
-    # Simulate space and cost requirements
-    np.random.seed(42)
-    mip_data['space_required'] = np.random.uniform(1, 5, len(mip_data))  # Shelf units
-    mip_data['inventory_cost'] = mip_data['avg_price'] * mip_data['mean_daily_demand'] * 30  # Monthly inventory cost
-    mip_data['contribution_margin'] = mip_data['total_revenue'] * 0.35  # 35% margin
+    # Use dataset columns for space and cost requirements
+    mip_data['space_required'] = mip_data['avg_stock_quantity'] * 0.1  # Space proportional to stock quantity
+    mip_data['inventory_cost'] = mip_data['avg_unit_cost'] * mip_data['avg_stock_quantity']  # Actual inventory cost
+    mip_data['contribution_margin'] = mip_data['total_revenue'] * mip_data['avg_profit_margin']  # Use actual profit margin
     
     # Constraints
     total_space = mip_data['space_required'].sum() * 0.6  # Can only use 60% of total space
@@ -487,10 +493,9 @@ def model_mip_assortment(df, product_demand, category_demand):
     # For demonstration, we'll use a greedy heuristic approximation
     # (Full MIP would require pulp or scipy.optimize.milp)
     
-    # Calculate efficiency score
-    mip_data['efficiency_score'] = mip_data['contribution_margin'] / (
-        mip_data['space_required'] + mip_data['inventory_cost'] / 1000
-    )
+    # Calculate efficiency score (avoid division by zero)
+    denominator = mip_data['space_required'] + mip_data['inventory_cost'] / 1000
+    mip_data['efficiency_score'] = mip_data['contribution_margin'] / denominator.replace(0, 0.01)
     
     # Sort by efficiency and select products
     mip_data_sorted = mip_data.sort_values('efficiency_score', ascending=False)
@@ -575,7 +580,7 @@ def model_mip_assortment(df, product_demand, category_demand):
     axes[1, 1].grid(axis='x', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('Prescriptive_Analytics/model_mip.png', dpi=300, bbox_inches='tight')
+    plt.savefig('model_mip.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return mip_data
@@ -606,11 +611,11 @@ def model_stochastic_optimization(df, product_demand):
     register_model("Stochastic Models", "Stochastic Optimization (Two-Stage)",
                    "Multi-scenario optimization under demand uncertainty")
     
-    # Parameters
+    # Parameters (using dataset columns)
     n_scenarios = 1000
-    ordering_cost = 50
-    holding_cost_rate = 0.02  # Per unit per day
-    shortage_cost_rate = 0.10  # Per unit per day (higher than holding)
+    ordering_cost = product_demand['avg_unit_cost'].mean() * 0.1  # 10% of average unit cost
+    holding_cost_rate = product_demand['avg_profit_margin'].mean() * 0.5  # Based on profit margin
+    shortage_cost_rate = holding_cost_rate * 2  # Higher than holding cost
     
     stochastic_results = []
     
@@ -751,7 +756,7 @@ def model_stochastic_optimization(df, product_demand):
     axes[1, 1].grid(axis='x', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('Prescriptive_Analytics/model_stochastic.png', dpi=300, bbox_inches='tight')
+    plt.savefig('model_stochastic.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return stochastic_df
@@ -824,8 +829,9 @@ def model_dynamic_pricing(df, product_demand):
         # Current pricing
         avg_price = cat_data['current_price'].mean()
         avg_original = cat_data['original_price'].mean()
-        margin = (avg_price - avg_original * 0.6) / avg_price  # Assume 60% COGS
-        marginal_cost = avg_original * 0.6
+        avg_unit_cost = cat_data['unit_cost'].mean()
+        margin = cat_data['profit_margin'].mean()  # Use actual profit margin from data
+        marginal_cost = avg_unit_cost  # Use actual unit cost from data
         
         # Optimal price based on elasticity
         if elasticity > 1:
@@ -931,7 +937,7 @@ def model_dynamic_pricing(df, product_demand):
     axes[1, 1].grid(axis='x', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('Prescriptive_Analytics/model_dynamic_pricing.png', dpi=300, bbox_inches='tight')
+    plt.savefig('model_dynamic_pricing.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return pricing_df
@@ -1100,7 +1106,7 @@ def model_markdown_optimization(df, product_demand):
     axes[1, 1].set_ylim(0, 110)
     
     plt.tight_layout()
-    plt.savefig('Prescriptive_Analytics/model_markdown.png', dpi=300, bbox_inches='tight')
+    plt.savefig('model_markdown.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return markdown_df
